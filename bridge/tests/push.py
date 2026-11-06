@@ -40,6 +40,17 @@ check("push registration carries the phone's key", r["status"] == 200 and f.get(
 r = a.call("PATCH", f"clo/local/devices/{token}", {"fields": {"token": {"stringValue": token}, "pub": {"stringValue": "forged"}}})
 check("…a phone can't claim another's key", (a.doc(f"clo/local/devices/{token}") or {}).get("pub", {}).get("stringValue") == a.pub)
 
+token2 = secrets.token_hex(32)   # the same phone, a new token (app update): the old one must go, or every turn rings twice
+r = a.call("PATCH", f"clo/local/devices/{token2}", {"fields": {"token": {"stringValue": token2}, "env": {"stringValue": "sandbox"}}})
+check("a phone's new token replaces its old one", r["status"] == 200 and a.doc(f"clo/local/devices/{token}") is None
+      and a.doc(f"clo/local/devices/{token2}") is not None)
+c = b.pair("Other phone")
+token3 = secrets.token_hex(32)
+c.call("PATCH", f"clo/local/devices/{token3}", {"fields": {"token": {"stringValue": token3}, "env": {"stringValue": "sandbox"}}})
+check("…another phone's token is left alone", a.doc(f"clo/local/devices/{token2}") is not None and a.doc(f"clo/local/devices/{token3}") is not None)
+c.call("DELETE", f"clo/local/devices/{token3}")
+token = token2
+
 rid = secrets.token_hex(8)
 a.queue(rid, "Reply with exactly one word: ok", profile="claude-yolo")
 st, _ = a.wait(rid)

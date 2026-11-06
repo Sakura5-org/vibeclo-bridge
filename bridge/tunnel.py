@@ -714,6 +714,21 @@ class Tunnel:
         self.log("pairing request from", name)
         self.ask(tag)
 
+    def drop_old_tokens(self, url, pub):
+        """A phone's push token changes (app updates, restores); Apple may keep delivering to the old one, and then every
+        turn rang twice — once with the summary, once the old plain way. Its registration names the phone (`pub`), so
+        any other token that phone registered here goes."""
+        coll, token = url.rsplit("/", 1)
+        try:
+            status, listing = self.handle("GET", coll + "?pageSize=200", None)
+            for d in (listing or {}).get("documents", []) if status == 200 else []:
+                other = d["name"].rsplit("/", 1)[1]
+                if other != token and d.get("fields", {}).get("pub", {}).get("stringValue") == pub:
+                    self.handle("DELETE", f"{coll}/{other}", None)
+                    self.log("push: dropped an old token of the same phone")
+        except Exception as e:
+            self.log("push: old token cleanup failed", e)
+
     def on_request(self, tag, dev, data, key=None, reply=None, seen=None):
         """One request from a device — via the relay (reply to its tag) or a direct connection (key/reply/seen given)."""
         key = key or self.key_for(dev["pub"])
@@ -764,9 +779,12 @@ class Tunnel:
                 method, url, body = req.get("method", "GET"), req.get("url", ""), req.get("body")
                 # A phone registering for notifications: remember which paired device it is, so the Mac can encrypt
                 # the notification text for exactly that phone (only its key opens it).
-                if method == "PATCH" and re.search(r"/devices/[0-9a-f]{20,200}$", url.split("?")[0]) and isinstance(body, dict):
+                reg = method == "PATCH" and re.search(r"/devices/[0-9a-f]{20,200}$", url.split("?")[0]) and isinstance(body, dict)
+                if reg:
                     body.setdefault("fields", {})["pub"] = {"stringValue": dev["pub"]}
                 status, body = self.handle(method, url, body)
+                if reg and status == 200:
+                    self.drop_old_tokens(url.split("?")[0], dev["pub"])
         except Exception as e:
             status, body = 500, {"error": str(e)[:500]}
         frame = seal(key, {"id": rid, "status": status, "body": body})
