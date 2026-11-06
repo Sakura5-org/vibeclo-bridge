@@ -1,0 +1,75 @@
+#!/usr/bin/env -S python3 -I
+"""Open a Claude Code session in this terminal without missing turns sent from the CLO app.
+
+  clo-resume              latest session of the current folder
+  clo-resume <id|prefix>  that session (any folder)
+  clo-resume <id> -- ...  extra args for claude (e.g. --dangerously-skip-permissions)
+
+Prints app turns you haven't seen here, waits if the bridge is mid-turn, then holds a lock so the
+bridge queues new app messages until you exit (the app shows "open on Mac", with "run anyway").
+"""
+import os, pathlib, re, subprocess, sys, time
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+import clo_bridge as b  # noqa: E402
+
+DIM, BOLD, OFF = "\033[2m", "\033[1m", "\033[0m"
+
+
+def find_session(arg):
+    files = sorted(b.PROJECTS.glob("*/*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if arg:
+        hits = [p for p in files if p.stem.startswith(arg)]
+        if not hits:
+            sys.exit(f"Không thấy session {arg}")
+        return hits[0]
+    folder = b.PROJECTS / re.sub(r"[^A-Za-z0-9]", "-", os.getcwd())
+    hits = [p for p in files if p.parent == folder]
+    if not hits:
+        sys.exit(f"Thư mục này chưa có session Claude Code. Chạy `claude` để tạo mới.")
+    return hits[0]
+
+
+def main():
+    args = sys.argv[1:]
+    extra = []
+    if "--" in args:
+        i = args.index("--")
+        args, extra = args[:i], args[i + 1:]
+    path = find_session(args[0] if args else None)
+    sid = path.stem
+    busy = b.STATE / "busy" / sid
+    if busy.exists():
+        print(f"{DIM}App đang chạy một turn trong session này, chờ xong…{OFF}", flush=True)
+        while busy.exists():
+            time.sleep(2)
+
+    seen_f = b.STATE / "seen" / sid
+    seen = seen_f.read_text().strip() if seen_f.exists() else ""
+    s = b.parse_session(path) or {"turns": [], "title": sid}
+    new = [t for t in s["turns"] if t.get("ts", "") > seen] if seen else s["turns"][-4:]
+    if new:
+        print(f"{BOLD}── {s['title']} · {'tin mới từ app' if seen else 'mấy lượt gần nhất'} ──{OFF}")
+        for t in new:
+            who = "Bạn" if t["role"] == "user" else "Claude"
+            print(f"{BOLD}{who}:{OFF} {t['text']}\n")
+        print(f"{BOLD}──────────{OFF}\n", flush=True)
+
+    lock = b.STATE / "open" / sid
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text(str(os.getpid()))
+    try:
+        code = subprocess.call([b.CONFIG["claude"], "--resume", sid, *extra])
+    except KeyboardInterrupt:
+        code = 130
+    finally:
+        lock.unlink(missing_ok=True)
+        last = (b.parse_session(path) or {"turns": []})["turns"]
+        if last:
+            seen_f.parent.mkdir(parents=True, exist_ok=True)
+            seen_f.write_text(last[-1].get("ts", ""))
+    sys.exit(code)
+
+
+if __name__ == "__main__":
+    main()

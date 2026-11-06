@@ -1,0 +1,18 @@
+name = "clo2-relay"
+main = "src/relay.js"
+compatibility_date = "2026-09-01"
+workers_dev = false
+routes = [{ pattern = "clo2-relay.synthvale.com", custom_domain = true }]
+
+# One Durable Object per paired Mac ("room"). Free plan: SQLite-backed classes only.
+[[durable_objects.bindings]]
+name = "ROOM"
+class_name = "Room"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["Room"]
+
+[vars]
+APNS_TEAM = "5H9G3P8QQH"
+# Secrets (wrangler secret put): APNS_KEY (.p8 contents), APNS_KEY_ID
