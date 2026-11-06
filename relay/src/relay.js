@@ -8,14 +8,14 @@
 // Mac → relay control (JSON text): {op:"allow"|"revoke", hash} · {op:"pair", hash, exp} · {to, data}
 // Dev → relay: {data} (forwarded to the mac as {from, data}) · pairing: {pub, data}
 // Relay → dev: {op:"presence", mac:bool} · {data}
-// Push (Mac → relay → APNs): {op:"push", token, env, kind: done|input|error, sid} · {op:"live", token, env, phase: working|done|error}.
-// The relay writes the text from a fixed list — a Mac can't send content through Apple — and rate-limits each room.
+// Push (Mac → relay → APNs): {op:"push", token, env, kind: done|input|error, sid, enc?} · {op:"live", token, env, phase: working|done|error}.
+// The relay writes the text from a fixed list and rate-limits each room; `enc` (title + summary) is ciphertext only the phone opens.
 
 export default {
   async fetch(req, env) {
     const url = new URL(req.url);
     const m = url.pathname.match(/^\/room\/([A-Za-z0-9_-]{16,64})$/);
-    if (!m) return new Response("CLO 2 relay", { status: url.pathname === "/" ? 200 : 404 });
+    if (!m) return new Response("Vibeclo relay", { status: url.pathname === "/" ? 200 : 404 });
     if (req.headers.get("Upgrade") !== "websocket") return new Response("websocket only", { status: 426 });
     return env.ROOM.get(env.ROOM.idFromName(m[1])).fetch(req);
   },
@@ -72,6 +72,9 @@ export class Room {
       if (!ALERTS[m.kind]) return;
       payload = { aps: { alert: { title: "Vibeclo", body: ALERTS[m.kind] }, sound: "default" } };
       if (/^[0-9a-f-]{36}$/.test(m.sid || "")) payload.sessionId = m.sid;   // a random id: lets the tap open the session
+      // Session title + turn summary, end-to-end encrypted for this phone (only its Notification Service Extension
+      // can open it); without it — or on an app without the extension — the fixed text above shows.
+      if (typeof m.enc === "string" && /^[A-Za-z0-9+/=]{24,3000}$/.test(m.enc)) { payload.e = m.enc; payload.aps["mutable-content"] = 1; }
       type = "alert"; topic = "com.leo.clo2";
     } else {
       const working = m.phase === "working";

@@ -123,6 +123,18 @@ def open_frame(key, data):
     return json.loads(zlib.decompress(AESGCM(key).decrypt(raw[:12], raw[12:], None), -15))
 
 
+def push_key(key):
+    """Key for notification text (see notify in clo_bridge.py): derived from the pairing key, used for nothing else."""
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=b"clo2-push", info=b"").derive(key)
+
+
+def seal_push(key, obj):
+    """Notification payload: base64(nonce ‖ AES-GCM(JSON)), no compression (a few hundred bytes; APNs allows 4 KB).
+    The phone's Notification Service Extension opens it; Apple and the relay only carry it."""
+    nonce = secrets.token_bytes(12)
+    return base64.b64encode(nonce + AESGCM(push_key(key)).encrypt(nonce, json.dumps(obj, ensure_ascii=False).encode(), None)).decode()
+
+
 def lan_key(key, challenge):
     """Per-connection key for the direct path (see module doc)."""
     return HKDF(algorithm=hashes.SHA256(), length=32, salt=challenge, info=b"clo2-lan").derive(key)
@@ -749,7 +761,12 @@ class Tunnel:
                 fn = self.ops.get(op)
                 status, body = fn(req, dev) if fn else (400, {"error": f"unknown op {op}"})
             else:
-                status, body = self.handle(req.get("method", "GET"), req.get("url", ""), req.get("body"))
+                method, url, body = req.get("method", "GET"), req.get("url", ""), req.get("body")
+                # A phone registering for notifications: remember which paired device it is, so the Mac can encrypt
+                # the notification text for exactly that phone (only its key opens it).
+                if method == "PATCH" and re.search(r"/devices/[0-9a-f]{20,200}$", url.split("?")[0]) and isinstance(body, dict):
+                    body.setdefault("fields", {})["pub"] = {"stringValue": dev["pub"]}
+                status, body = self.handle(method, url, body)
         except Exception as e:
             status, body = 500, {"error": str(e)[:500]}
         frame = seal(key, {"id": rid, "status": status, "body": body})

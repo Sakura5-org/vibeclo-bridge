@@ -214,15 +214,60 @@ def devices(uid):
 _tunnel = {"t": None}   # the running Tunnel: pushes go out through the relay (it holds the APNs key)
 
 
-def notify(uid, kind, sid=""):
-    """Alert on every paired device that registered for push. CLO 2: only a kind (done / input / error) leaves this Mac;
-    the relay turns it into a fixed text — no request or reply text goes through Apple."""
+def notify(uid, kind, sid="", title="", text=""):
+    """Alert on every paired device that registered for push. The relay writes a fixed text ("Claude is done"); the
+    session title and a short summary of the turn travel end-to-end encrypted for that one phone (`enc`, opened by the
+    app's Notification Service Extension) — Apple and the relay never see them. Phones whose doc has no `pub` yet
+    (registered before this) or an app without the extension show the fixed text."""
     tun = _tunnel["t"]
     if not tun:
         return
     for d in devices(uid):
         if d.get("token"):
-            tun.ctl({"op": "push", "token": d["token"], "env": d.get("env") or "production", "kind": kind, "sid": sid})
+            msg = {"op": "push", "token": d["token"], "env": d.get("env") or "production", "kind": kind, "sid": sid}
+            if d.get("pub") and (title or text):
+                try:
+                    msg["enc"] = tunnel_mod.seal_push(tun.key_for(d["pub"]), {"t": title[:120], "b": text[:240]})
+                except Exception as e:
+                    log("push: can't encrypt for", d["token"][:8], e)
+            log("push", kind, d["token"][:8], "+summary" if "enc" in msg else "(fixed text)")
+            tun.ctl(msg)
+
+
+def _plain(s):
+    """Markdown → plain text for a notification line."""
+    s = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", s)
+    s = re.sub(r"(\*\*|__|`)", "", s)
+    s = re.sub(r"^\s*(?:[-*+]|\d+\.|#+)\s+", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def push_summary(reply):
+    """The notification text for a finished turn: Claude's closing `⤷ …` line (NOTIFY_HINT), else the first prose
+    paragraph of the reply (no tool lines, code, tables or quotes), cut to fit."""
+    lines = [l.rstrip() for l in (reply or "").splitlines()]
+    for l in reversed(lines):
+        if l.lstrip().startswith("⤷"):
+            out = _plain(l.lstrip().lstrip("⤷"))
+            if out:
+                return out if len(out) <= 220 else out[:219].rsplit(" ", 1)[0] + "…"
+    para, code = [], False
+    for l in lines:
+        t = l.strip()
+        if t.startswith("```"):
+            code = not code
+            continue
+        if code or t.startswith(("🔧", "|", ">", "clo2://", "🖼")):
+            if para:
+                break
+            continue
+        if not t:
+            if para:
+                break
+            continue
+        para.append(t)
+    out = _plain(" ".join(para))
+    return out if len(out) <= 220 else out[:219].rsplit(" ", 1)[0] + "…"
 
 
 def live_update(uid, sid, title, activity, working, force=False):
@@ -271,6 +316,9 @@ ARTIFACT_HINT = ("The user reads this chat in the Vibeclo phone app/web. When a 
                  "shows it as a live preview. To update, rerun with `--id <same id>`. This command IS your artifact tool: when the user "
                  "asks to show or open an HTML page here — including an existing .html file on this Mac — run it on that file and reply "
                  "with the link. Artifacts stay on this Mac; the app loads them through its encrypted connection.")
+
+NOTIFY_HINT = (" End every reply with one last line `⤷ <summary>`: at most ~120 characters, in the user's language — what you "
+               "did and, if anything, what the user needs to do next. Their phone shows that line as the notification.")
 
 SECRET_HINT = (" Secrets: the user keeps passwords/API keys/tokens in the Vibeclo vault on this Mac. `clo2-secret list` shows the "
                "names (never values). Use one without printing it: `X=$(clo2-secret get NAME) cmd`, `eval \"$(clo2-secret env NAME)\"`, or "
@@ -1376,7 +1424,7 @@ def run_request(uid, rid, req):
         cmd += ["--effort", req["effort"]]  # picked in the app's composer
     cmd += permission_args(profile)
     if (HOME / ".local/bin/clo2-artifact").exists():
-        cmd += ["--append-system-prompt", ARTIFACT_HINT + (SECRET_HINT if (HOME / ".local/bin/clo2-secret").exists() else "")]
+        cmd += ["--append-system-prompt", ARTIFACT_HINT + (SECRET_HINT if (HOME / ".local/bin/clo2-secret").exists() else "") + NOTIFY_HINT]
     browser = bool(req.get("browser")) or (CONFIG.get("browser_always", True) and not fork)  # Claude opens it only if needed
     if browser:
         # Browser only for these turns, so normal terminal sessions don't carry the tool definitions.
@@ -1450,7 +1498,10 @@ def run_request(uid, rid, req):
         try:
             last = next((l for l in reversed(redact("\n\n".join(parts)).splitlines()) if l.strip() and not l.startswith("🔧")), "")
             if status != "cancelled" and not fork:   # the user stopped it themselves (stop / "Gửi ngay") — no need to tell them
-                notify(uid, "error" if status == "error" else "input" if last.rstrip().endswith("?") else "done", new_sid or sid)
+                psid = new_sid or sid
+                ptitle = (unfields(api("GET", f"{BASE}/clo/{uid}/terminalSessions/{psid}") or {}).get("title") or "") if psid else ""
+                ptext = (redact(err)[:200] if status == "error" and err else "") or push_summary(redact("\n\n".join(parts)))
+                notify(uid, "error" if status == "error" else "input" if last.rstrip().endswith("?") else "done", psid, ptitle, ptext)
             if new_sid and not fork:
                 live_update(uid, new_sid, "", "error" if status == "error" else "", False, force=True)
         except Exception as e:

@@ -42,7 +42,9 @@ iPhone (Vibeclo) ──E2E encrypted──▶ relay (Cloudflare, blind) ──�
   approved; it stores token hashes, never messages. On the same network the phone talks to the bridge directly.
 - **You stay in control.** Approve or revoke devices from the menu bar icon or `clo2 devices`. Choose what Claude may
   do: *Standard* (`--permission-mode acceptEdits`) or *Full access* (`--dangerously-skip-permissions`) — `clo2 settings`.
-- **Notifications** carry only a fixed text ("Claude is done", …) and a random session id — never your content.
+- **Notifications** show the session title and a one-line summary of what Claude did — encrypted on your computer
+  for that one phone (a key derived from its pairing) and opened by the app on the phone. Apple and the relay only
+  carry ciphertext next to a fixed text ("Claude is done") and a random session id.
 
 ## Commands
 

@@ -46,7 +46,7 @@ marker = lambda: ("release" in (APP / "localstore.py").read_text() and (APP / "l
 # ---- installer (web/install.sh) from the local site, throwaway HOME, no LaunchAgents
 publish(10, "v10")
 shutil.copy(BRIDGE.parent / "web/install.sh", SITE / "install.sh")
-env = {**os.environ, "HOME": str(ROOT / "home"), "CLO2_BASE": BASE, "CLO2_NO_AGENT": "1"}
+env = {**os.environ, "HOME": str(ROOT / "home"), "CLO2_BASE": BASE, "CLO2_NO_AGENT": "1", "CLO2_RELEASE_PUB": PUB}   # the test key signs this site
 r = subprocess.run(["bash", str(SITE / "install.sh")], env=env, capture_output=True, text=True, timeout=900)
 check("installer: downloads every manifest file + verifies hashes", r.returncode == 0 and all((APP / f).exists() for f in FILES), r.stdout[-400:] + r.stderr[-400:])
 check("installer: keeps MANIFEST.json (seq for the updater)", json.loads((APP / "MANIFEST.json").read_text())["seq"] == 10)
@@ -62,7 +62,7 @@ check("installed menu bar builds its menu", r.returncode == 0 and "Pair a phone"
 
 publish(10, "v10b", tamper="localstore.py")
 r = subprocess.run(["bash", str(SITE / "install.sh")], env=env, capture_output=True, text=True, timeout=900)
-check("installer: refuses a file that doesn't match the manifest", r.returncode != 0 and "bị sai" in r.stdout and marker() == "v10", r.stdout[-200:])
+check("installer: refuses a file that doesn't match the manifest", r.returncode != 0 and "didn't download correctly" in r.stdout and marker() == "v10", r.stdout[-200:])
 
 # ---- updater
 publish(10, "v10")
