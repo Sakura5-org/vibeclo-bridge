@@ -1786,6 +1786,22 @@ def poll_inbox(uid):
                 _mark(RAN, rid)
                 threading.Thread(target=loops, daemon=True).start()
             continue
+        if req.get("kind") == "dream":
+            if (req.get("machine") or "") == CONFIG["machine"] and req.get("status") == "pending" and rid not in _running \
+                    and not restart_holding():
+                def dream(rid=rid, req=req):
+                    try:
+                        dream_session(uid, rid, req)
+                    except Exception as e:
+                        log("memory dream failed", e)
+                        set_doc(f"clo/{uid}/terminalInbox/{rid}", {"status": "error", "error": str(e)[:800], "editedAt": now()},
+                                ["status", "error", "editedAt"])
+                    finally:
+                        _running.pop(rid, None)
+                _running[rid] = None
+                _mark(RAN, rid)
+                threading.Thread(target=dream, daemon=True).start()
+            continue
         if req.get("kind") == "killProc":
             if (req.get("machine") or "") == CONFIG["machine"] and req.get("status") == "pending":
                 _mark(RAN, rid)
@@ -2497,6 +2513,289 @@ def scan_open_loops(uid, rid, req):
     log("open loops", kept, f"${cost:.2f}" if cost else "")
 
 
+# ---------------------------------------------------------------- memory (Claude Code's auto memory, per project)
+# ~/.claude/projects/<folder>/memory/*.md (MEMORY.md = the index Claude Code loads into every session: first 200 lines /
+# 25 KB). The app lists / edits / deletes notes through tunnel ops; "dream" (one session → its project's memory) has a
+# cheaper model re-read that session against the notes and returns edits, which are applied here with an undo record.
+MEMORY_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]{0,100}\.md$")
+MEMORY_KEY = re.compile(r"^-[A-Za-z0-9._-]{0,250}$")
+DREAMS = tunnel_mod.DIR / "memory-dreams"
+INDEX_LINES, INDEX_BYTES = 200, 25_000
+
+
+def _proj_key(path):
+    return re.sub(r"[^A-Za-z0-9]", "-", str(path))
+
+
+def memory_dir_for(cwd):
+    """Claude Code keeps one memory per git repo (its root), else per folder."""
+    root = cwd
+    try:
+        r = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=5)
+        if r.returncode == 0 and r.stdout.strip():
+            root = r.stdout.strip()
+    except Exception:
+        pass
+    for c in (root, cwd):
+        d = PROJECTS / _proj_key(c) / "memory"
+        if d.is_dir():
+            return d
+    return PROJECTS / _proj_key(root) / "memory"
+
+
+def _mem_dir(key):
+    key = str(key or "")
+    if not MEMORY_KEY.match(key) or ".." in key:
+        raise ValueError("bad project")
+    return PROJECTS / key / "memory"
+
+
+def _mem_path(key, name):
+    name = str(name or "")
+    if not MEMORY_FILE.match(name) or "/" in name or ".." in name:
+        raise ValueError("bad file name")
+    return _mem_dir(key) / name
+
+
+def _project_cwd(folder):
+    """The real folder of a ~/.claude/projects entry (the name is lossy): any transcript's cwd."""
+    for t in sorted(folder.glob("*.jsonl"), key=lambda p: p.stat().st_mtime, reverse=True)[:3]:
+        try:
+            with open(t, errors="replace") as f:
+                for _, line in zip(range(40), f):
+                    c = (json.loads(line) or {}).get("cwd") if line.startswith("{") else None
+                    if c:
+                        root = subprocess.run(["git", "-C", c, "rev-parse", "--show-toplevel"], capture_output=True, text=True, timeout=5)
+                        return root.stdout.strip() if root.returncode == 0 and _proj_key(root.stdout.strip()) == folder.name else c
+        except Exception:
+            continue
+    return folder.name.replace("-", "/")
+
+
+def _front(text):
+    """name / description / type from a note's frontmatter."""
+    out = {}
+    if text.startswith("---"):
+        for line in text.split("\n---", 1)[0].splitlines()[1:]:
+            m = re.match(r"\s*(name|description|type):\s*(.*)", line)
+            if m:   # the note's `name` → "title" (the file name is "name")
+                out["title" if m.group(1) == "name" else m.group(1)] = m.group(2).strip().strip('"')
+    return out
+
+
+def op_memory_projects(req, dev):
+    out = []
+    for d in PROJECTS.glob("*/memory"):
+        files = [f for f in d.glob("*.md") if f.is_file()]
+        if not files:
+            continue
+        idx = d / "MEMORY.md"
+        itext = idx.read_text(errors="replace") if idx.exists() else ""
+        out.append({"key": d.parent.name, "cwd": _project_cwd(d.parent), "files": len(files),
+                    "bytes": sum(f.stat().st_size for f in files), "indexLines": len(itext.splitlines()),
+                    "indexBytes": len(itext.encode()), "updatedAt": max(f.stat().st_mtime for f in files)})
+    out.sort(key=lambda x: -x["updatedAt"])
+    return 200, {"projects": out, "limits": {"lines": INDEX_LINES, "bytes": INDEX_BYTES}}
+
+
+def op_memory_files(req, dev):
+    try:
+        d = _mem_dir(req.get("key"))
+    except ValueError as e:
+        return 400, {"error": str(e)}
+    files = []
+    for f in sorted(d.glob("*.md"), key=lambda f: (f.name != "MEMORY.md", f.name.lower())):
+        text = f.read_text(errors="replace")[:200_000]
+        files.append({"name": f.name, "text": redact(text), "size": f.stat().st_size, "updatedAt": f.stat().st_mtime, **_front(text)})
+    return 200, {"files": files, "cwd": _project_cwd(d.parent)}
+
+
+def op_memory_write(req, dev):
+    try:
+        f = _mem_path(req.get("key"), req.get("name"))
+    except ValueError as e:
+        return 400, {"error": str(e)}
+    text = str(req.get("text") or "")
+    if len(text.encode()) > 100_000:
+        return 413, {"error": "Too long for a memory note"}
+    f.parent.mkdir(parents=True, exist_ok=True)
+    tmp = f.with_suffix(".md.tmp")
+    tmp.write_text(text)
+    os.replace(tmp, f)
+    log("memory: wrote", f.parent.parent.name[-40:], f.name, "from", dev.get("name"))
+    return 200, {"ok": True}
+
+
+def _drop_index_lines(d, name):
+    """A deleted note's pointer line in MEMORY.md (`- [Title](name.md) — …`) goes too."""
+    idx = d / "MEMORY.md"
+    if name == "MEMORY.md" or not idx.exists():
+        return
+    lines = idx.read_text(errors="replace").splitlines(keepends=True)
+    keep = [l for l in lines if f"]({name})" not in l]
+    if len(keep) != len(lines):
+        idx.write_text("".join(keep))
+
+
+def op_memory_delete(req, dev):
+    try:
+        f = _mem_path(req.get("key"), req.get("name"))
+    except ValueError as e:
+        return 400, {"error": str(e)}
+    f.unlink(missing_ok=True)
+    _drop_index_lines(f.parent, f.name)
+    log("memory: deleted", f.parent.parent.name[-40:], f.name, "from", dev.get("name"))
+    return 200, {"ok": True}
+
+
+def _dream_file(did):
+    if not SAFE_ID.match(str(did or "")):
+        raise ValueError("bad id")
+    return DREAMS / f"{did}.json"
+
+
+def op_memory_dreams(req, dev):
+    sid, key = str(req.get("sessionId") or ""), str(req.get("key") or "")
+    out = []
+    for f in sorted(DREAMS.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:200]:
+        try:
+            d = json.loads(f.read_text())
+        except ValueError:
+            continue
+        if (sid and d.get("sessionId") != sid) or (key and d.get("key") != key):
+            continue
+        out.append(d)
+        if len(out) >= 30:
+            break
+    return 200, {"dreams": out}
+
+
+def op_memory_undo(req, dev):
+    """Puts back what a dream changed — each file only if nobody edited it since (else it is listed as skipped)."""
+    try:
+        f = _dream_file(req.get("dream"))   # not "id": that is the request id
+        d = json.loads(f.read_text())
+        mdir = _mem_dir(d["key"])
+    except (ValueError, OSError, KeyError):
+        return 404, {"error": "This memory update isn't on this Mac"}
+    if d.get("undone"):
+        return 200, {"ok": True, "skipped": []}
+    skipped = []
+    for c in reversed(d.get("changes") or []):
+        p = mdir / c["file"]
+        now_text = p.read_text(errors="replace") if p.exists() else None
+        if now_text != c.get("after"):
+            skipped.append(c["file"]); continue
+        if c.get("before") is None:
+            p.unlink(missing_ok=True)
+        else:
+            p.write_text(c["before"])
+    d["undone"] = True
+    f.write_text(json.dumps(d, ensure_ascii=False))
+    log("memory: undid dream", d.get("id"), "skipped", skipped)
+    return 200, {"ok": True, "skipped": skipped}
+
+
+DREAM_PROMPT = """You maintain Claude Code's long-term memory for the project {cwd}. Memory = the markdown notes below; MEMORY.md
+is the index loaded into EVERY future session (keep it short: one line per note, `- [Title](file.md) — hook`; only the first
+{lines} lines are ever read). Below is one finished work session in this project. Update the memory from it.
+
+What belongs in memory — only what a future session cannot read from the code, git history or files:
+- verified rules and gotchas (how it was proven; the trap to avoid), decisions and their reasons, the user's preferences and
+  corrections, ongoing goals/constraints, pointers to external resources.
+- NOT: volatile state that goes stale (current numbers, what is running now), code structure, things already in repo docs,
+  step-by-step logs of what was done, secrets (never write a password/key/token value).
+Also CHECK the existing notes against this session (it is ground truth for what it covers): fix notes it contradicts, delete
+notes it proves wrong or obsolete, merge duplicates. Prefer editing an existing note over adding a new one. One topic per
+file; follow the existing notes' format (frontmatter `name`, `description`, `metadata.type` user|feedback|project|reference;
+feedback/project notes end with **Why:** and **How to apply:** lines; link related notes with [[name]]). Write in the
+language the existing notes use (else the user's language in the session). Convert relative dates to absolute dates.
+If nothing is worth remembering, change nothing. Few, high-value edits beat many.
+
+Return ONLY one ```json block:
+{{"summary": "1-2 sentences in the user's language: what you remembered / fixed (or that nothing was worth keeping)",
+  "changes": [{{"file": "name.md", "action": "write" | "delete", "why": "short reason, user's language",
+                "content": "the COMPLETE new file content (for write)"}}]}}
+Every new or deleted note must also be reflected in MEMORY.md (write MEMORY.md in full when it changes). Use no tools.
+
+CURRENT MEMORY ({nfiles} files):
+{memory}
+
+SESSION "{title}" ({date}):
+{session}"""
+
+
+def dream_digest(s, cap=110_000):
+    parts = []
+    for t in s["turns"]:
+        text = "\n".join(l for l in t["text"].splitlines() if not l.startswith("🖼"))
+        lim = 3000 if t["role"] == "user" else 2500
+        parts.append(f"[{t['role']}] {text.strip()[:lim]}")
+    out = "\n\n".join(parts)
+    if len(out) > cap:
+        out = out[:15_000] + "\n\n[… middle of the session left out …]\n\n" + out[-(cap - 15_000):]
+    return redact(out)
+
+
+def dream_session(uid, rid, req):
+    path = f"clo/{uid}/terminalInbox/{rid}"
+    sid = str(req.get("sessionId") or "")
+    set_doc(path, {"status": "running", "startedAt": now(), "reply": "Reading the session…", "editedAt": now()},
+            ["status", "startedAt", "reply", "editedAt"])
+    t = next(PROJECTS.glob(f"*/{sid}.jsonl"), None) if SAFE_ID.match(sid) else None
+    s = parse_session(t) if t else None
+    if not s or not s.get("cwd"):
+        raise RuntimeError("This session isn't on this Mac")
+    mdir = memory_dir_for(s["cwd"])
+    key = mdir.parent.name
+    notes = {f.name: f.read_text(errors="replace") for f in sorted(mdir.glob("*.md"))} if mdir.is_dir() else {}
+    mem = "\n\n".join(f"=== {n} ===\n{v[:12_000]}" for n, v in notes.items())[:80_000] or "(empty — no notes yet)"
+    prompt = DREAM_PROMPT.format(cwd=s["cwd"], lines=INDEX_LINES, nfiles=len(notes), memory=redact(mem), title=s["title"][:120],
+                                 date=(s.get("lastAt") or "")[:10], session=dream_digest(s))
+    cmd = [CONFIG["claude"], "-p", "--output-format", "json", "--no-session-persistence", "--tools", "",
+           "--model", CONFIG.get("dream_model") or CONFIG.get("loops_model") or "sonnet"]
+    log("memory dream", sid[:8], len(prompt) // 1000, "k chars →", key[-40:])
+    set_doc(path, {"reply": "Comparing it with the memory…", "editedAt": now()}, ["reply", "editedAt"])
+    r = subprocess.run(cmd, cwd=str(HOME), env=profile_env("claude"), input=prompt, capture_output=True, text=True, timeout=900)
+    try:
+        res = json.loads(r.stdout)
+        text, cost = res.get("result") or "", res.get("total_cost_usd") or 0
+    except ValueError:
+        raise RuntimeError((r.stderr or r.stdout or "no output")[-500:])
+    m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S) or re.search(r"(\{.*\})", text, re.S)
+    plan = json.loads(m.group(1)) if m else {}
+    changes = []
+    for c in (plan.get("changes") or [])[:20]:
+        name, action = str(c.get("file") or ""), c.get("action")
+        if not MEMORY_FILE.match(name) or action not in ("write", "delete"):
+            continue
+        p = mdir / name
+        before = p.read_text(errors="replace") if p.exists() else None
+        after = None if action == "delete" else str(c.get("content") or "")
+        if action == "write" and (not after.strip() or len(after.encode()) > (INDEX_BYTES if name == "MEMORY.md" else 30_000)):
+            continue
+        if after is not None and any(v in after for v in _secret_values["values"].values()):
+            continue   # never a secret value in memory
+        if before == after or (before is None and action == "delete"):
+            continue
+        changes.append({"file": name, "action": action, "why": str(c.get("why") or "")[:300], "before": before, "after": after})
+    for c in changes:   # apply after all are checked
+        p = mdir / c["file"]
+        if c["after"] is None:
+            p.unlink(missing_ok=True)
+        else:
+            mdir.mkdir(parents=True, exist_ok=True)
+            p.write_text(c["after"])
+    summary = redact(str(plan.get("summary") or ""))[:600] or ("Nothing new worth remembering." if not changes else "")
+    rec = {"id": rid, "sessionId": sid, "sessionTitle": s["title"][:120], "cwd": s["cwd"], "key": key, "at": time.time(),
+           "summary": summary, "cost": cost, "changes": changes, "undone": False}
+    DREAMS.mkdir(parents=True, exist_ok=True)
+    _dream_file(rid).write_text(json.dumps(rec, ensure_ascii=False))
+    set_doc(path, {"status": "done", "reply": summary, "dreamId": rid, "finishedAt": now(), "editedAt": now()},
+            ["status", "reply", "dreamId", "finishedAt", "editedAt"])
+    log("memory dream done", sid[:8], len(changes), "change(s)", f"${cost:.2f}" if cost else "")
+
+
 BRIDGE_DIR = pathlib.Path(__file__).resolve().parent
 CLI_TOOLS = ("clo2-artifact", "clo2-secret", "clo2-resume")
 
@@ -2939,7 +3238,7 @@ def heartbeat(uid):
             # restart.sh waiting for running turns: new ones are held until then (the app says why they wait)
             "restarting": RESTART.exists(), "runningCount": len([r for r in _running if r not in _injected_ids]), "tools": [t for t in CLI_TOOLS if (HOME / ".local/bin" / t).exists()],
             "procs": _procs_safe(),
-            "features": ["inject", "skills", "openLoops", "saved", "child", "suggest", "effort", "environments", "signed", "secrets", "chat", "procs", "changes", "secretFetch"]})  # app only sends kinds a bridge understands
+            "features": ["inject", "skills", "openLoops", "saved", "child", "suggest", "effort", "environments", "signed", "secrets", "chat", "procs", "changes", "secretFetch", "memory"]})  # app only sends kinds a bridge understands
 
 
 def self_update_loop():
@@ -3148,7 +3447,9 @@ def op_secret_fetch(req, dev):
 
 
 TUNNEL_OPS = {"upload": op_upload, "artifact": op_artifact, "secret.set": op_secret_set,
-              "secret.delete": op_secret_delete, "secret.reveal": op_secret_reveal, "secret.fetch": op_secret_fetch}
+              "secret.delete": op_secret_delete, "secret.reveal": op_secret_reveal, "secret.fetch": op_secret_fetch,
+              "memory.projects": op_memory_projects, "memory.files": op_memory_files, "memory.write": op_memory_write,
+              "memory.delete": op_memory_delete, "memory.dreams": op_memory_dreams, "memory.undo": op_memory_undo}
 
 
 def main():
