@@ -22,7 +22,7 @@ _sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))   # -I (isolated) 
 import trial as _trial  # noqa: E402  stdlib only, first: a new release that keeps crashing is rolled back here
 _TRIAL = _trial.start()
 import localstore, tunnel as tunnel_mod, pairpage, clo2_tools, updater  # noqa: E402
-import base64, hashlib, uuid, tempfile, datetime as dt, json, os, re, shutil, pathlib, platform, signal, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
+import base64, hashlib, uuid, tempfile, datetime as dt, json, os, re, shutil, pathlib, platform, signal, socket, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
 
 HOME = pathlib.Path.home()
 CONFIG = {
@@ -315,7 +315,11 @@ ARTIFACT_HINT = ("The user reads this chat in the Vibeclo phone app/web. When a 
                  "`clo2-artifact FILE.html --title \"…\"`; put the printed clo2://artifact/… link on its own line in your reply — the app "
                  "shows it as a live preview. To update, rerun with `--id <same id>`. This command IS your artifact tool: when the user "
                  "asks to show or open an HTML page here — including an existing .html file on this Mac — run it on that file and reply "
-                 "with the link. Artifacts stay on this Mac; the app loads them through its encrypted connection.")
+                 "with the link. Artifacts stay on this Mac; the app loads them through its encrypted connection. A page can call an "
+                 "API with a key from the Vibeclo vault without the key ever being in the page: `await clo2.fetch(\"https://api…\", "
+                 "{method, headers, body, secret: \"NAME\"})` sends `Authorization: Bearer <NAME>`; or put `{{secret:NAME}}` where "
+                 "the key goes (header, URL, body string). The Mac adds the key and makes the call (https only, no redirects); it "
+                 "returns a normal Response. The user approves each page × secret × host once on the phone.")
 
 NOTIFY_HINT = (" End every reply with one last line `⤷ <summary>`: at most ~120 characters, in the user's language — what you "
                "did and, if anything, what the user needs to do next. Their phone shows that line as the notification.")
@@ -2935,7 +2939,7 @@ def heartbeat(uid):
             # restart.sh waiting for running turns: new ones are held until then (the app says why they wait)
             "restarting": RESTART.exists(), "runningCount": len([r for r in _running if r not in _injected_ids]), "tools": [t for t in CLI_TOOLS if (HOME / ".local/bin" / t).exists()],
             "procs": _procs_safe(),
-            "features": ["inject", "skills", "openLoops", "saved", "child", "suggest", "effort", "environments", "signed", "secrets", "chat", "procs", "changes"]})  # app only sends kinds a bridge understands
+            "features": ["inject", "skills", "openLoops", "saved", "child", "suggest", "effort", "environments", "signed", "secrets", "chat", "procs", "changes", "secretFetch"]})  # app only sends kinds a bridge understands
 
 
 def self_update_loop():
@@ -3066,8 +3070,85 @@ def refresh_local_secrets():
     _secret_values["at"] = time.time()
 
 
+SECRET_REF = re.compile(r"\{\{secret:([A-Za-z0-9_.-]{1,64})\}\}")
+FETCH_MAX = 8 * 1024 * 1024
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):   # a redirect would carry the key's headers to wherever it points: hand the 3xx back instead
+        return None
+
+
+def _public_host(host):
+    """Only real internet hosts: a page must not aim a key (or this Mac) at localhost / the LAN."""
+    import ipaddress
+    try:
+        infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+    except OSError:
+        return False
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0].split("%")[0])
+        if not ip.is_global:
+            return False
+    return bool(infos)
+
+
+def op_secret_fetch(req, dev):
+    """An artifact's API call with a vault secret ({{secret:NAME}} in url/headers/body, or `secret` → Bearer). The phone
+    asked the user first (per page, secret and host). The value is added here and never leaves the Mac: not in the page,
+    on the phone or through the relay; it is also scrubbed from the answer."""
+    url, method = str(req.get("url") or ""), str(req.get("method") or "GET").upper()
+    headers = {str(k): str(v) for k, v in (req.get("headers") or {}).items()} if isinstance(req.get("headers"), dict) else {}
+    body = base64.b64decode(req.get("body") or "") if req.get("body") else None
+    u = urllib.parse.urlsplit(url)
+    test_http = os.environ.get("CLO2_TEST_FETCH_HTTP") == "1" and u.scheme == "http" and u.hostname == "127.0.0.1"
+    if not test_http and (u.scheme != "https" or not u.hostname or not _public_host(u.hostname)):
+        return 400, {"error": "Only https:// addresses on the internet can be called with a secret"}
+    if method not in ("GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"):
+        return 400, {"error": "bad method"}
+    names = set(SECRET_REF.findall(url)) | {n for v in headers.values() for n in SECRET_REF.findall(v)}
+    if body:
+        names |= set(SECRET_REF.findall(body.decode("utf-8", "replace")))
+    bearer = str(req.get("secret") or "")
+    if bearer:
+        names.add(bearer)
+    if not names:
+        return 400, {"error": "No secret named in this request"}
+    values = {}
+    for n in names:
+        v = clo2_tools.secret_get(n)
+        if v is None:
+            return 404, {"error": f"No secret {n} on this Mac — add it in Vibeclo › Secrets"}
+        values[n] = v
+    sub = lambda t: SECRET_REF.sub(lambda m: values[m.group(1)], t)
+    used_ref = any(SECRET_REF.search(x) for x in [url, *headers.values()]) or (body and SECRET_REF.search(body.decode("utf-8", "replace")))
+    url, headers = sub(url), {k: sub(v) for k, v in headers.items()}
+    if body:
+        body = sub(body.decode("utf-8", "surrogateescape")).encode("utf-8", "surrogateescape")
+    if bearer and not used_ref and not any(k.lower() == "authorization" for k in headers):
+        headers["Authorization"] = "Bearer " + values[bearer]
+    headers.setdefault("User-Agent", "Vibeclo")
+    r = urllib.request.Request(url, data=body, method=method, headers=headers)
+    try:
+        resp = urllib.request.build_opener(_NoRedirect).open(r, timeout=30)
+    except urllib.error.HTTPError as e:
+        resp = e
+    except Exception as e:
+        log("secret fetch", ",".join(sorted(names)), "→", u.hostname, "failed:", type(e).__name__)
+        return 502, {"error": f"Couldn't reach {u.hostname}: {e}".replace(url, u.hostname or "")}
+    data = resp.read(FETCH_MAX + 1)
+    if len(data) > FETCH_MAX:
+        return 413, {"error": "The answer is larger than 8 MB"}
+    out_headers = {k: v for k, v in resp.headers.items() if k.lower() not in ("set-cookie", "content-encoding", "transfer-encoding", "content-length")}
+    for v in values.values():   # an API that echoes the request back must not hand the key to the page
+        data = data.replace(v.encode(), b"[secret]")
+        out_headers = {k: h.replace(v, "[secret]") for k, h in out_headers.items()}
+    log("secret fetch", ",".join(sorted(names)), method, u.hostname, "→", resp.status, "for", dev.get("name"))   # names only
+    return 200, {"status": resp.status, "headers": out_headers, "body": base64.b64encode(data).decode()}
+
+
 TUNNEL_OPS = {"upload": op_upload, "artifact": op_artifact, "secret.set": op_secret_set,
-              "secret.delete": op_secret_delete, "secret.reveal": op_secret_reveal}
+              "secret.delete": op_secret_delete, "secret.reveal": op_secret_reveal, "secret.fetch": op_secret_fetch}
 
 
 def main():
