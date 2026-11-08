@@ -1,12 +1,11 @@
 """Codex (OpenAI Codex CLI) sessions from the app: new turn, resume, the Standard sandbox, Full access, stop, and the
-session mirrored with agent "codex". Real Codex turns (needs `codex` logged in; on the owner's mini via the proxy home).
+session mirrored with agent "codex". Real Codex turns (needs `codex` logged in; CODEX_TEST_HOME=… for another CODEX_HOME).
   ~/.clo2/venv/bin/python -I bridge/tests/codex.py"""
 import os, pathlib, secrets, shutil, subprocess, sys, time
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from harness import Bridge, check, done
 
-home = os.path.expanduser("~/.codex-accounts/proxy")
-extra = {"codex_home": home} if os.path.isdir(home) else {}
+extra = {"codex_home": os.environ["CODEX_TEST_HOME"]} if os.environ.get("CODEX_TEST_HOME") else {}   # default: ~/.codex
 PROJ = pathlib.Path(f"/tmp/clo2-cx-{secrets.token_hex(3)}").resolve(); PROJ.mkdir()
 subprocess.run(["git", "init", "-q", str(PROJ)])
 OUT = pathlib.Path.home() / f"clo2-cx-outside-{secrets.token_hex(3)}.txt"

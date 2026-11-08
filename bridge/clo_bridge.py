@@ -774,6 +774,7 @@ _codex = {"files": {}, "at": 0.0, "order": []}   # session id → rollout path; 
 CODEX_ID = re.compile(r"rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
 CODEX_NOISE = ("<environment_context", "<user_instructions", "<permissions", "# AGENTS.md instructions", "<INSTRUCTIONS",
                "<turn_aborted", "<user_shell_command")
+CODEX_TAG = re.compile(r"<[a-z][a-z0-9_-]*>")   # context Codex adds as a user message (<recommended_plugins>, <skills_instructions>…)
 
 
 def codex_list(force=False):
@@ -861,7 +862,7 @@ def parse_codex(path):
                 continue
             if pt == "message" and p.get("role") in ("user", "assistant"):
                 text = _codex_text(p.get("content"))
-                if not text or (p["role"] == "user" and text.lstrip().startswith(CODEX_NOISE)):
+                if not text or (p["role"] == "user" and (text.lstrip().startswith(CODEX_NOISE) or CODEX_TAG.match(text.lstrip()))):
                     continue
                 role = p["role"]
                 if role == "user":
