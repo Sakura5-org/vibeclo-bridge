@@ -37,6 +37,7 @@ doc = doc or {}
 g = lambda k: (doc.get(k) or {}).get("stringValue", "")
 check("session listed in the app as a Codex session (title, folder)", g("agent") == "codex" and "hello.txt" in g("title")
       and g("cwd").endswith(PROJ.name), {k: g(k) for k in ("agent", "title", "cwd")})
+check("…with its model", "gpt" in g("model") or "o" in g("model"), g("model"))
 tr = [(x["mapValue"]["fields"]["role"]["stringValue"]) for x in (doc.get("transcript") or {}).get("arrayValue", {}).get("values", [])]
 check("…its transcript: your message, then Codex", tr[:2] == ["user", "assistant"], tr)
 
@@ -61,4 +62,7 @@ check("stop works", st == "cancelled", st)
 machine = subprocess.run(["hostname", "-s"], capture_output=True, text=True).stdout.strip()
 feats = str((a.doc(f"clo/local/bridge/{machine}") or {}).get("features", ""))
 check("the bridge lists Codex in its features", "'codex'" in feats, feats[:300])
+cu = (a.doc(f"clo/local/bridge/{machine}") or {}).get("codexUsage", {}).get("mapValue", {}).get("fields", {})
+print("   codexUsage:", str(cu)[:300])
+check("ChatGPT plan + Codex limits in the heartbeat (ChatGPT login)", "ChatGPT" in str(cu.get("plan")) and "left" in str(cu.get("windows")), cu)
 done()

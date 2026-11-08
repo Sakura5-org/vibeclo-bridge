@@ -752,7 +752,7 @@ def upload_session(uid, sid, p, mtime, key, limit, agent="claude"):
                "parentId": children().get(sid, ""),
                "background": is_background(uid, sid, p) if agent == "claude" else (s.get("source") == "exec" and sid not in app_sessions(uid)),
                "contextTokens": context_tokens(sid) if agent == "claude" else s.get("contextTokens", 0),
-               "agent": agent,
+               "agent": agent, "model": s.get("model", ""),
                "activity": redact(s["activity"]), "activityAt": dt.datetime.fromtimestamp(mtime, dt.timezone.utc),
                "syncedAt": now()}  # every write: app/web list only what changed since their last look (Firestore bills reads)
         try:
@@ -832,7 +832,7 @@ def _codex_tool(p):
 def parse_codex(path):
     """→ like parse_session: title, cwd, turns, activity, state, lastAt (+ source, contextTokens)."""
     cwd, source, turns, title = None, "", [], None
-    state, activity, ctx, last_ts = "idle", "", 0, ""
+    state, activity, ctx, last_ts, model, effort = "idle", "", 0, "", "", ""
     with open(path, errors="replace") as f:
         for line in f:
             try:
@@ -845,6 +845,8 @@ def parse_codex(path):
                 continue
             if t == "turn_context":
                 cwd = p.get("cwd") or cwd
+                model = p.get("model") or model
+                effort = p.get("effort") or p.get("reasoning_effort") or effort
                 continue
             pt = p.get("type")
             if t == "event_msg":
@@ -855,6 +857,9 @@ def parse_codex(path):
                 elif pt == "token_count":
                     u = ((p.get("info") or {}).get("last_token_usage")) or {}
                     ctx = int(u.get("input_tokens") or 0) or ctx
+                elif pt == "thread_settings_applied":
+                    ts_ = p.get("thread_settings") or {}
+                    model, effort = ts_.get("model") or model, ts_.get("reasoning_effort") or effort
                 elif pt == "thread_name_updated" and p.get("thread_name"):
                     title = p["thread_name"]
                 continue
@@ -887,7 +892,8 @@ def parse_codex(path):
     if not turns:
         return None
     return {"title": title or "Codex session", "cwd": cwd or str(HOME), "turns": turns, "activity": activity,
-            "state": state, "lastAt": last_ts or turns[-1]["ts"], "source": source, "contextTokens": ctx}
+            "state": state, "lastAt": last_ts or turns[-1]["ts"], "source": source, "contextTokens": ctx,
+            "model": " · ".join(x for x in (model, effort) if x)}
 
 
 def scan_codex(uid, force=None, limit=None):
@@ -908,6 +914,54 @@ def scan_codex(uid, force=None, limit=None):
         except Exception as e:
             _uploaded[sid] = key
             log("codex session failed", sid[:8], e)
+
+
+_codex_usage = {"at": 0.0, "v": None}
+
+
+def _window_label(minutes):
+    m = int(minutes or 0)
+    return {300: "5h", 10080: "Week", 43200: "30d"}.get(m) or (f"{m // 1440}d" if m >= 1440 else f"{max(1, m // 60)}h")
+
+
+def codex_usage():
+    """ChatGPT plan + Codex rate-limit windows from the newest session that has them (Codex writes `rate_limits` with
+    each token count when signed in with ChatGPT; a proxy / API key has none). Cached a minute."""
+    if time.time() - _codex_usage["at"] < 60:
+        return _codex_usage["v"]
+    codex_list()
+    found = None
+    for sid in _codex["order"][:15]:
+        f = _codex["files"].get(sid)
+        try:
+            with open(f, "rb") as fh:
+                fh.seek(max(0, f.stat().st_size - 300_000))
+                lines = fh.read().decode(errors="replace").splitlines()
+        except (OSError, TypeError):
+            continue
+        for line in reversed(lines):
+            if '"rate_limits":{' not in line.replace(" ", "") :
+                continue
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            rl = (d.get("payload") or {}).get("rate_limits") or {}
+            wins = []
+            for k in ("primary", "secondary"):
+                w = rl.get(k) or {}
+                if isinstance(w.get("used_percent"), (int, float)):
+                    wins.append({"label": _window_label(w.get("window_minutes")), "left": max(0, round(100 - w["used_percent"])),
+                                 "resetsAt": dt.datetime.fromtimestamp(w["resets_at"], dt.timezone.utc).isoformat() if w.get("resets_at") else ""})
+            if wins:
+                model = (parse_codex(f) or {}).get("model", "")
+                found = {"plan": "ChatGPT " + (rl.get("plan_type") or "").capitalize() if rl.get("plan_type") else "ChatGPT",
+                         "windows": wins, "model": model, "fetchedAt": d.get("timestamp", "")}
+            break
+        if found:
+            break
+    _codex_usage.update(at=time.time(), v=found)
+    return found
 
 
 CODEX_EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "xhigh"}
@@ -3491,7 +3545,7 @@ def heartbeat(uid):
     set_doc(f"clo/{uid}/bridge/{CONFIG['machine']}", {"machine": CONFIG["machine"], "label": CONFIG["label"] or CONFIG["machine"],
             "lastSeen": now(), "cwds": recent_cwds(), "projects": project_dirs(), "slashCommands": _slash["list"],
             "profiles": ["claude-yolo", "claude"], "home": str(HOME), "access": tunnel_mod.setting("access"),
-            "version": _version(), "usage": claude_usage() or {}, "ramUsed": ram_used_pct(), "cpuTemp": cpu_temp(),
+            "version": _version(), "usage": claude_usage() or {}, "codexUsage": (codex_usage() if CONFIG["codex"] else None) or {}, "ramUsed": ram_used_pct(), "cpuTemp": cpu_temp(),
             "diskUsed": disk_pct, "diskFree": disk_free, "license": owner_license(), "secretKey": _secret_key(), "signKey": _sign_key(),
             # restart.sh waiting for running turns: new ones are held until then (the app says why they wait)
             "restarting": RESTART.exists(), "runningCount": len([r for r in _running if r not in _injected_ids]), "tools": [t for t in CLI_TOOLS if (HOME / ".local/bin" / t).exists()],
