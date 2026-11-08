@@ -36,6 +36,8 @@ CONFIG = {
     "auto_update": True,       # one-line installs (~/.clo2/app): signed releases from clo.sakura5.app
     "update_every": 3600,
     "claude": None,  # auto: ~/.local/bin, /opt/homebrew/bin, PATH
+    "codex": None,   # OpenAI Codex CLI, auto like claude (no codex = the app doesn't offer it)
+    "codex_home": None,   # CODEX_HOME for app turns + where its sessions are read (default: $CODEX_HOME or ~/.codex)
     "label": None,   # friendly machine name shown in the app (default: hostname)
     "accept_untargeted": False,
     "compact_at": 500000,          # context tokens; above this the bridge runs /compact before the next app turn
@@ -60,6 +62,10 @@ if os.environ.get("CLO_CONFIG"):  # tests / overrides
 
 CONFIG["claude"] = CONFIG["claude"] or shutil.which(
     "claude", path=f"{HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", "")) or "claude"
+
+CONFIG["codex"] = CONFIG["codex"] or shutil.which(
+    "codex", path=f"{HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:" + os.environ.get("PATH", ""))
+CODEX_HOME = pathlib.Path(os.path.expanduser(CONFIG["codex_home"] or os.environ.get("CODEX_HOME") or str(HOME / ".codex")))
 
 BASE = "local/documents"
 DOC_PREFIX = f"projects/{CONFIG['project']}/databases/(default)/documents"
@@ -654,6 +660,11 @@ def compact_session(uid, rid, sid, cwd, profile):
 
 
 def scan_sessions(uid, force=None, limit=None):
+    if CONFIG["codex"]:
+        try:
+            scan_codex(uid, force, limit)
+        except Exception as e:
+            log("codex scan failed", e)
     files = sorted((p for p in PROJECTS.glob("*/*.jsonl")), key=lambda p: p.stat().st_mtime, reverse=True)
     picked = files[: limit or CONFIG["max_sessions"]] + [p for p in files if p.stem == force]
     for p in picked:
@@ -710,8 +721,8 @@ def is_background(uid, sid, path):
         return False
 
 
-def upload_session(uid, sid, p, mtime, key, limit):
-        s = parse_session(p)
+def upload_session(uid, sid, p, mtime, key, limit, agent="claude"):
+        s = parse_session(p) if agent == "claude" else parse_codex(p)
         _uploaded[sid] = key
         if not s:
             return
@@ -739,8 +750,9 @@ def upload_session(uid, sid, p, mtime, key, limit):
                "needsInput": s["state"] != "working" and asks_user(s["turns"]),
                "totalCost": round(sum(x.get("cost") or 0 for x in s["turns"]), 2),  # whole session, not just the mirrored tail
                "parentId": children().get(sid, ""),
-               "background": is_background(uid, sid, p),
-               "contextTokens": context_tokens(sid),
+               "background": is_background(uid, sid, p) if agent == "claude" else (s.get("source") == "exec" and sid not in app_sessions(uid)),
+               "contextTokens": context_tokens(sid) if agent == "claude" else s.get("contextTokens", 0),
+               "agent": agent,
                "activity": redact(s["activity"]), "activityAt": dt.datetime.fromtimestamp(mtime, dt.timezone.utc),
                "syncedAt": now()}  # every write: app/web list only what changed since their last look (Firestore bills reads)
         try:
@@ -753,6 +765,249 @@ def upload_session(uid, sid, p, mtime, key, limit):
         set_doc(f"clo/{uid}/terminalSessions/{sid}", doc, list(doc.keys()))
         if not limit:
             log("session ↑", sid[:8], s["title"][:50])
+
+
+# ---------------------------------------------------------------- Codex (OpenAI Codex CLI) sessions
+# Turns run with `codex exec --json` (new) / `codex exec resume <id>` in the session's folder; its sessions are read from
+# $CODEX_HOME/sessions/YYYY/MM/DD/rollout-<time>-<id>.jsonl and mirrored like Claude's (field agent: "codex").
+_codex = {"files": {}, "at": 0.0, "order": []}   # session id → rollout path; newest-first ids (re-listed ≤ every 20 s)
+CODEX_ID = re.compile(r"rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$")
+CODEX_NOISE = ("<environment_context", "<user_instructions", "<permissions", "# AGENTS.md instructions", "<INSTRUCTIONS",
+               "<turn_aborted", "<user_shell_command")
+
+
+def codex_list(force=False):
+    if not force and time.time() - _codex["at"] < 20:
+        return
+    found = {}
+    for f in (CODEX_HOME / "sessions").glob("*/*/*/rollout-*.jsonl"):
+        m = CODEX_ID.search(f.name)
+        if m:
+            found[m.group(1)] = f
+    _codex["files"] = found
+    _codex["order"] = sorted(found, key=lambda i: found[i].stat().st_mtime if found[i].exists() else 0, reverse=True)
+    _codex["at"] = time.time()
+
+
+def codex_file(sid):
+    if not sid or not re.fullmatch(r"[0-9a-f-]{36}", sid):
+        return None
+    f = _codex["files"].get(sid)
+    if not (f and f.exists()):
+        codex_list(force=True)
+        f = _codex["files"].get(sid)
+    return f if f and f.exists() else None
+
+
+def _codex_text(content):
+    return "\n".join(c.get("text", "") for c in content or [] if isinstance(c, dict) and c.get("type") in ("input_text", "output_text", "text")).strip()
+
+
+def _codex_tool(p):
+    """One line for a tool call, like Claude's `🔧 Name: hint`."""
+    t = p.get("type")
+    if t == "function_call":
+        try:
+            a = json.loads(p.get("arguments") or "{}")
+        except ValueError:
+            a = {}
+        cmd = a.get("command") or a.get("cmd") or a.get("path") or ""
+        cmd = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+        return f"🔧 {p.get('name') or 'tool'}: {cmd}"
+    if t == "local_shell_call":
+        cmd = (p.get("action") or {}).get("command") or ""
+        return "🔧 Bash: " + (" ".join(cmd) if isinstance(cmd, list) else str(cmd))
+    if t == "custom_tool_call":
+        inp = str(p.get("input") or "")
+        m = re.search(r"""(?:cmd|command)\s*:\s*(?:\[\s*)?["'`]((?:[^"'`\\]|\\.)*)""", inp) or re.search(r"""path\s*:\s*["'`]([^"'`]+)""", inp)
+        name = re.search(r"tools\.([A-Za-z_]+)", inp)
+        hint = m.group(1) if m else inp.strip().splitlines()[0] if inp.strip() else ""
+        return f"🔧 {name.group(1) if name else p.get('name') or 'tool'}: {hint}"
+    if t == "web_search_call":
+        return "🔧 WebSearch: " + str((p.get("action") or {}).get("query") or "")
+    return ""
+
+
+def parse_codex(path):
+    """→ like parse_session: title, cwd, turns, activity, state, lastAt (+ source, contextTokens)."""
+    cwd, source, turns, title = None, "", [], None
+    state, activity, ctx, last_ts = "idle", "", 0, ""
+    with open(path, errors="replace") as f:
+        for line in f:
+            try:
+                d = json.loads(line)
+            except ValueError:
+                continue
+            ts, p, t = d.get("timestamp", ""), d.get("payload") or {}, d.get("type")
+            if t == "session_meta":
+                cwd, source = p.get("cwd") or cwd, p.get("source") or source
+                continue
+            if t == "turn_context":
+                cwd = p.get("cwd") or cwd
+                continue
+            pt = p.get("type")
+            if t == "event_msg":
+                if pt == "task_started":
+                    state, activity = "working", "Thinking…"
+                elif pt in ("task_complete", "turn_aborted"):
+                    state, activity = "idle", ""
+                elif pt == "token_count":
+                    u = ((p.get("info") or {}).get("last_token_usage")) or {}
+                    ctx = int(u.get("input_tokens") or 0) or ctx
+                elif pt == "thread_name_updated" and p.get("thread_name"):
+                    title = p["thread_name"]
+                continue
+            if t != "response_item":
+                continue
+            if pt == "message" and p.get("role") in ("user", "assistant"):
+                text = _codex_text(p.get("content"))
+                if not text or (p["role"] == "user" and text.lstrip().startswith(CODEX_NOISE)):
+                    continue
+                role = p["role"]
+                if role == "user":
+                    if text.startswith(FILE_HEAD) or text.startswith(PHOTO_HEAD):
+                        text = text.partition("\n\n")[2] or text
+                    title = title or text.strip().splitlines()[0][:100]
+                    activity = "Thinking…"
+                if turns and turns[-1]["role"] == role == "assistant":
+                    turns[-1]["text"] += "\n\n" + text
+                else:
+                    turns.append({"role": role, "text": text, "ts": ts})
+                last_ts = ts
+                continue
+            hint = _codex_tool(p)
+            if hint:
+                hint = " ⏎ ".join(l.strip() for l in hint.splitlines() if l.strip())[:200]
+                activity = hint[2:].strip()
+                if turns and turns[-1]["role"] == "assistant":
+                    turns[-1]["text"] += "\n" + hint
+                else:
+                    turns.append({"role": "assistant", "text": hint, "ts": ts})
+    if not turns:
+        return None
+    return {"title": title or "Codex session", "cwd": cwd or str(HOME), "turns": turns, "activity": activity,
+            "state": state, "lastAt": last_ts or turns[-1]["ts"], "source": source, "contextTokens": ctx}
+
+
+def scan_codex(uid, force=None, limit=None):
+    codex_list()
+    ids = _codex["order"][: limit or CONFIG["max_sessions"]]
+    if force and force not in ids and codex_file(force):
+        ids.append(force)
+    for sid in ids:
+        p = _codex["files"].get(sid)
+        if not p or not p.exists():
+            continue
+        mtime = p.stat().st_mtime
+        key = (mtime, False, time.time() - mtime < 90, answered(sid, mtime))
+        if _uploaded.get(sid) == key and sid != force:
+            continue
+        try:
+            upload_session(uid, sid, p, mtime, key, limit, agent="codex")
+        except Exception as e:
+            _uploaded[sid] = key
+            log("codex session failed", sid[:8], e)
+
+
+CODEX_EFFORT = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "xhigh"}
+
+
+def codex_args(profile):
+    """Full access only when asked for (…-yolo) AND this Mac allows it; else writes stay inside the project folder."""
+    if profile.endswith("yolo") and tunnel_mod.setting("access") == "full":
+        return ["--dangerously-bypass-approvals-and-sandbox"]
+    return ["-c", 'sandbox_mode="workspace-write"', "-c", 'approval_policy="never"']
+
+
+def _codex_event_line(item):
+    t = item.get("type")
+    if t == "command_execution":
+        return "🔧 Bash: " + " ⏎ ".join(l.strip() for l in str(item.get("command") or "").splitlines() if l.strip())[:200]
+    if t == "file_change":
+        ch = item.get("changes") or []
+        return "🔧 Edit: " + ", ".join(str(c.get("path") or "") for c in ch[:4])
+    if t == "mcp_tool_call":
+        return f"🔧 {item.get('server') or 'mcp'}.{item.get('tool') or ''}"
+    if t == "web_search":
+        return "🔧 WebSearch: " + str(item.get("query") or "")
+    return ""
+
+
+def run_codex(uid, rid, req, sid, profile, cwd):
+    path = f"clo/{uid}/terminalInbox/{rid}"
+    if not CONFIG["codex"]:
+        return set_doc(path, {"status": "error", "error": "Codex isn't installed on this Mac", "editedAt": now()}, ["status", "error", "editedAt"])
+    hints = ARTIFACT_HINT + (SECRET_HINT if (HOME / ".local/bin/clo2-secret").exists() else "") + NOTIFY_HINT
+    cmd = [CONFIG["codex"], "exec"] + (["resume"] if sid else []) + ["--json", "--skip-git-repo-check"] + codex_args(profile)
+    cmd += ["-c", "developer_instructions=" + json.dumps(hints)]
+    if CODEX_EFFORT.get(req.get("effort")):
+        cmd += ["-c", f'model_reasoning_effort="{CODEX_EFFORT[req["effort"]]}"']
+    cmd += ([sid] if sid else []) + ["-"]
+    env = profile_env("codex")
+    env["CODEX_HOME"] = str(CODEX_HOME)
+    log("run", rid[:8], "codex session", sid[:8] or "(new)", profile, cwd)
+    set_doc(path, {"status": "running", "startedAt": now(), "editedAt": now()}, ["status", "startedAt", "editedAt"])
+    proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            text=True, start_new_session=True)
+    _running[rid] = proc
+    if sid:
+        _run_sid[rid] = sid
+    proc.stdin.write(prompt_for(rid, req))
+    proc.stdin.close()
+    killer = threading.Timer(CONFIG["job_timeout"], lambda: os.killpg(proc.pid, signal.SIGTERM))
+    killer.start()
+    parts, new_sid, last_push, err = [], sid, 0.0, None
+    try:
+        for line in proc.stdout:
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            t, item = ev.get("type"), ev.get("item") or {}
+            if t == "thread.started" and ev.get("thread_id"):
+                new_sid = ev["thread_id"]
+                _run_sid[rid] = new_sid
+            elif t == "item.completed" and item.get("type") == "agent_message" and (item.get("text") or "").strip():
+                parts.append(item["text"].strip())
+            elif t == "item.completed" and _codex_event_line(item):
+                parts.append(_codex_event_line(item))
+            elif t in ("turn.failed", "error"):
+                err = str((ev.get("error") or {}).get("message") or ev.get("message") or "Codex error")[:1500]
+            if time.time() - last_push > 1.5:
+                set_doc(path, {"reply": redact("\n\n".join(parts)), "resultSessionId": new_sid, "editedAt": now()},
+                        ["reply", "resultSessionId", "editedAt"])
+                last_push = time.time()
+        proc.wait()
+    finally:
+        killer.cancel()
+        _running.pop(rid, None)
+        _run_sid.pop(rid, None)
+    cancelled = proc.returncode in (-signal.SIGTERM, -signal.SIGKILL) or _stopped.pop(rid, False)
+    if not cancelled and not err and proc.returncode != 0:
+        err = (proc.stderr.read()[-1500:].strip() or f"codex exit {proc.returncode}")
+    status = "cancelled" if cancelled else "error" if err else "done"
+    reply = redact("\n\n".join(parts))
+    set_doc(path, {"reply": reply, "resultSessionId": new_sid, "status": status, "error": err or "", "finishedAt": now(), "editedAt": now()},
+            ["reply", "resultSessionId", "status", "error", "finishedAt", "editedAt"])
+    log("done", rid[:8], status, "codex", new_sid[:8] if new_sid else "")
+    if new_sid:
+        codex_list(force=True)
+    try:
+        if status != "cancelled":
+            ptitle = ""
+            f = codex_file(new_sid) if new_sid else None
+            if f:
+                ptitle = (parse_codex(f) or {}).get("title", "")
+            last = next((l for l in reversed(reply.splitlines()) if l.strip() and not l.startswith("🔧")), "")
+            ptext = (redact(err)[:200] if err else "") or push_summary(reply)
+            notify(uid, "error" if err else "input" if last.rstrip().endswith("?") else "done", new_sid, ptitle, ptext)
+    except Exception as e:
+        log("notify failed", e)
+    if new_sid:
+        try:
+            scan_sessions(uid, force=new_sid)
+        except Exception as e:
+            log("rescan failed", e)
 
 
 # ---------------------------------------------------------------- running requests
@@ -1407,6 +1662,8 @@ def run_request(uid, rid, req):
     if not os.path.isdir(cwd):
         set_doc(path, {"status": "error", "error": f"Folder not found: {cwd}", "editedAt": now()}, ["status", "error", "editedAt"])
         return
+    if (sid and codex_file(sid)) or (not sid and profile.startswith("codex")):
+        return run_codex(uid, rid, req, sid, profile, cwd)   # the session's own agent decides, not the app's picker
     fork = bool(req.get("fork")) and bool(sid)
     child = bool(req.get("child")) and bool(sid) and not fork  # sub-session: a fork that stays a session and reports back
     compacted = None
@@ -3238,7 +3495,7 @@ def heartbeat(uid):
             # restart.sh waiting for running turns: new ones are held until then (the app says why they wait)
             "restarting": RESTART.exists(), "runningCount": len([r for r in _running if r not in _injected_ids]), "tools": [t for t in CLI_TOOLS if (HOME / ".local/bin" / t).exists()],
             "procs": _procs_safe(),
-            "features": ["inject", "skills", "openLoops", "saved", "child", "suggest", "effort", "environments", "signed", "secrets", "chat", "procs", "changes", "secretFetch", "memory"]})  # app only sends kinds a bridge understands
+            "features": ["inject", "skills", "openLoops", "saved", "child", "suggest", "effort", "environments", "signed", "secrets", "chat", "procs", "changes", "secretFetch", "memory"] + (["codex"] if CONFIG["codex"] else [])})  # app only sends kinds a bridge understands
 
 
 def self_update_loop():
