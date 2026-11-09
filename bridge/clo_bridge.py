@@ -1738,6 +1738,8 @@ def run_request(uid, rid, req):
         cmd += ["--worktree"]  # fresh git worktree under <cwd>/.claude/worktrees for this new session
     if req.get("effort") in ("low", "medium", "high", "xhigh", "max"):
         cmd += ["--effort", req["effort"]]  # picked in the app's composer
+    if re.fullmatch(r"(opus|sonnet|fable|haiku|claude-[a-z0-9.-]{1,40})(\[1m\])?", str(req.get("model") or "")):
+        cmd += ["--model", req["model"]]  # picked in the composer ("" = the Mac's default / the session's own)
     cmd += permission_args(profile)
     if (HOME / ".local/bin/clo2-artifact").exists():
         cmd += ["--append-system-prompt", ARTIFACT_HINT + (SECRET_HINT if (HOME / ".local/bin/clo2-secret").exists() else "") + NOTIFY_HINT]
