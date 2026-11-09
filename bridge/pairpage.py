@@ -4,6 +4,7 @@ here without a CORS preflight this server never answers — so other sites can't
 import json
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PAGE = """<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -114,6 +115,23 @@ def serve(tunnel, port=7788, log=print, web="https://clo.sakura5.app"):
                 self.send_header("Content-Length", str(len(data)))
                 self.end_headers()
                 return self.wfile.write(data)
+            if self.path.split("?")[0] == "/web":
+                # Same Mac, browsers that block https → http://127.0.0.1 fetches (Safari): the web app's "Connect this Mac"
+                # button navigates here and we send it back with the auto-approved link in the fragment (never sent to
+                # a server). Only to the web app's own origins; a site that sends someone here just gets them paired
+                # with their own Mac on our page — it can't read the link.
+                q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+                to = (q.get("to") or [web])[0].rstrip("/")
+                if to not in allowed:
+                    return self._json({"error": "forbidden"}, 403)
+                if not (tunnel.pairing and tunnel.pairing["exp"] > time.time() + 30):
+                    tunnel.start_pairing()
+                self.send_response(302)
+                self.send_header("Location", to + "/#pair=" + tunnel.qr().split("d=", 1)[1])
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             if self.path == "/api/state":
                 return self._json(dict(tunnel.state(), web=web.rstrip("/")))
             if self.path in ("/", "/index.html"):
