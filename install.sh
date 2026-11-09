@@ -1,9 +1,9 @@
 #!/bin/bash
-# Vibeclo bridge on a Mac (or Ubuntu/Linux) — one line:  curl -fsSL https://clo.sakura5.app/install.sh | bash
+# Vibeclo bridge on a Mac (or Ubuntu/Linux) — one line:  curl -fsSL https://clo2.sakura5.app/install.sh | bash
 # Downloads the bridge into ~/.clo2/app, sets up a private Python env and a LaunchAgent, then opens the pairing page.
 # Uninstall:  bash ~/.clo2/app/install.sh uninstall   (your data in ~/.clo2 stays; delete the folder to wipe it)
 set -euo pipefail
-BASE="${CLO2_BASE:-https://clo.sakura5.app}"
+BASE="${CLO2_BASE:-https://clo2.sakura5.app}"
 APP="$HOME/.clo2/app"
 
 case "$(uname)" in Darwin|Linux) ;; *) echo "The Vibeclo bridge runs on macOS or Linux."; exit 1;; esac

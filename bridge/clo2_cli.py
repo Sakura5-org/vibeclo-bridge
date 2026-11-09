@@ -80,7 +80,7 @@ def state():
         start = ("systemctl --user restart clo2-bridge" if sys.platform.startswith("linux")
                  else "launchctl kickstart gui/%d/com.clo2.bridge" % os.getuid())
         sys.exit(f"Vibeclo isn't running on this Mac. Start it: {start} "
-                 "(or reinstall: curl -fsSL https://clo.sakura5.app/install.sh | bash)")
+                 "(or reinstall: curl -fsSL https://clo2.sakura5.app/install.sh | bash)")
 
 
 def tty_input(prompt):
@@ -218,7 +218,7 @@ def cmd_tailscale():
         host, login = tunnel.setup_ts_web(int(cfg.get("ts_web", 7779)))
     except Exception as e:
         sys.exit(f"Couldn't set it up: {e}")
-    print(f"Done. On another computer signed in to Tailscale as {login or 'you'}: open https://clo.sakura5.app →")
+    print(f"Done. On another computer signed in to Tailscale as {login or 'you'}: open https://clo2.sakura5.app →")
     print(f"“Pair over Tailscale” → {host.rsplit(':', 1)[0]} → type the 4 digits in the Vibeclo dialog on this Mac.")
     subprocess.run(["bash", str(HERE / "restart.sh")])
 

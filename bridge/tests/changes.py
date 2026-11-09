@@ -75,13 +75,13 @@ def get(path, origin=None, method="GET"):
 
 st, h, body = get("/api/localpair", "https://evil.example")
 check("localpair refuses other sites", st == 403 and "Access-Control-Allow-Origin" not in h, st)
-st, h, _ = get("/api/localpair", "https://clo.sakura5.app", "OPTIONS")
+st, h, _ = get("/api/localpair", "https://clo2.sakura5.app", "OPTIONS")
 check("preflight allows the web app (Private Network Access)",
-      st == 204 and h.get("Access-Control-Allow-Origin") == "https://clo.sakura5.app" and h.get("Access-Control-Allow-Private-Network") == "true", h)
-st, h, body = get("/api/localpair", "https://clo.sakura5.app")
+      st == 204 and h.get("Access-Control-Allow-Origin") == "https://clo2.sakura5.app" and h.get("Access-Control-Allow-Private-Network") == "true", h)
+st, h, body = get("/api/localpair", "https://clo2.sakura5.app")
 link = json.loads(body)["link"]
 p = json.loads(unb64u(link.split("d=", 1)[1]))
-check("localpair link carries auto-approve", st == 200 and p.get("a") and h.get("Access-Control-Allow-Origin") == "https://clo.sakura5.app", p)
+check("localpair link carries auto-approve", st == 200 and p.get("a") and h.get("Access-Control-Allow-Origin") == "https://clo2.sakura5.app", p)
 
 # A browser using it is paired without "Cho phép".
 from cryptography.hazmat.primitives import hashes, serialization

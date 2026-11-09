@@ -1,11 +1,11 @@
 #!/bin/bash
-# Check that what clo.sakura5.app hands out — and what is installed on this computer — is exactly the code in this
+# Check that what clo2.sakura5.app hands out — and what is installed on this computer — is exactly the code in this
 # repository: every file of the signed release manifest must match bridge/<file> here byte for byte (SHA-256).
 #   git clone https://github.com/Sakura5-org/vibeclo-bridge && cd vibeclo-bridge && ./verify-release.sh
 # Needs only bash, curl and python3. Run it before installing, or any time after.
 set -euo pipefail
 cd "$(dirname "$0")"
-BASE="${CLO2_BASE:-https://clo.sakura5.app}"
+BASE="${CLO2_BASE:-https://clo2.sakura5.app}"
 APP="$HOME/.clo2/app"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 curl -fsSL "$BASE/bridge/MANIFEST.json" -o "$tmp/MANIFEST.json"

@@ -5,7 +5,7 @@ Start, follow and steer your Claude Code sessions from your phone — your code,
 computer.
 
 ```bash
-curl -fsSL https://clo.sakura5.app/install.sh | bash
+curl -fsSL https://clo2.sakura5.app/install.sh | bash
 ```
 
 Then open Vibeclo on your iPhone and pair: on the same Wi-Fi your computer shows up in the app (tap **Pair** and type

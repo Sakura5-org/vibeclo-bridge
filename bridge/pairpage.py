@@ -59,11 +59,11 @@ load();setInterval(load,1500);
 </script></body></html>"""
 
 
-LEGACY_WEB = "https://clo2.synthvale.com"   # the web app's first home; still served, still allowed
+LEGACY_WEB = ("https://clo2.synthvale.com", "https://clo.sakura5.app")   # owner's domain + the old public one; still served, still allowed
 
 
-def serve(tunnel, port=7788, log=print, web="https://clo.sakura5.app"):
-    allowed = {web.rstrip("/"), LEGACY_WEB}
+def serve(tunnel, port=7788, log=print, web="https://clo2.sakura5.app"):
+    allowed = {web.rstrip("/"), *LEGACY_WEB}
     page = PAGE.replace("%WEB%", json.dumps(web.rstrip("/")))
 
     class H(BaseHTTPRequestHandler):
@@ -79,7 +79,7 @@ def serve(tunnel, port=7788, log=print, web="https://clo.sakura5.app"):
             self.wfile.write(data)
 
         def _cors(self):
-            """The web app (https://clo.sakura5.app, or its old clo2.synthvale.com) opened in a browser on this Mac may ask for the local pairing
+            """The web app (https://clo2.sakura5.app, clo2.synthvale.com or the old clo.sakura5.app) opened in a browser on this Mac may ask for the local pairing
             link; Chrome's Private Network Access sends a preflight first. No other site gets an answer it can read."""
             origin = self.headers.get("Origin", "")
             if origin in allowed:

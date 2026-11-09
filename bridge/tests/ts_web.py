@@ -12,7 +12,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 from tunnel import check_code, lan_key
 
 PORT = 7999
-WEB = "https://clo.sakura5.app"
+WEB = "https://clo2.sakura5.app"
 b = Bridge(7798, "tsweb", {"ts_web": PORT}, extra_env={"CLO2_NO_TAILNET": "1", "CLO2_LAN_GRACE": "4"})
 
 

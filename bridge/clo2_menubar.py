@@ -18,7 +18,7 @@ import urllib.request
 HERE = pathlib.Path(__file__).resolve().parent
 PORT = int(os.environ.get("CLO2_PORT") or 7788)
 API = f"http://127.0.0.1:{PORT}"
-WEB = "https://clo.sakura5.app"
+WEB = "https://clo2.sakura5.app"
 LABEL = "com.clo2.bridge"
 
 

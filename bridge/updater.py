@@ -24,7 +24,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))   # run as a sc
 import trial  # noqa: E402
 
 RELEASE_PUB = "QHso7bBNWwK4dDP4YdJSX0Ap6MgoP+od54y9TQsAySQ="   # Ed25519; private half: vault secret CLO2_RELEASE_KEY
-BASE = os.environ.get("CLO2_BASE") or "https://clo.sakura5.app"
+BASE = os.environ.get("CLO2_BASE") or "https://clo2.sakura5.app"
 NAME = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$")
 EXECUTABLE = {"install.sh", "restart.sh", "clo-resume"}
 MAX_FILE = 8 * 1024 * 1024

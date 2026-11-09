@@ -95,7 +95,7 @@ check("no signature file → refused", not ok and not app.exists(), out[-300:])
 
 srv.shutdown()
 try:
-    live = "https://clo.sakura5.app/bridge/"
+    live = "https://clo2.sakura5.app/bridge/"
     get = lambda f: urllib.request.urlopen(urllib.request.Request(live + f, headers={"User-Agent": "curl/8"}), timeout=15).read()
     m, s = get("MANIFEST.json"), get("MANIFEST.sig").decode()
     check("the live release verifies with the baked-in key", stdlib_verify(updater.RELEASE_PUB, m, s))

@@ -384,7 +384,7 @@ def check_code(mac_pub, dev_pub):
 
 
 class Tunnel:
-    def __init__(self, relay, label, handle, log, ops=None, lan_port=0, ts_web=0, web="https://clo.sakura5.app"):
+    def __init__(self, relay, label, handle, log, ops=None, lan_port=0, ts_web=0, web="https://clo2.sakura5.app"):
         self.relay, self.label, self.handle, self.log = relay.rstrip("/"), label, handle, log
         self.ops = ops or {}
         self.on_push_result = None       # op name → fn(req, device) → (status, body): uploads, secrets, artifacts…
@@ -411,7 +411,7 @@ class Tunnel:
         self.active = {}           # device hash → last request time (relay path)
         self.changes, self.changes_lock = set(), threading.Lock()
         self.web = web.rstrip("/")
-        self.web_origins = {self.web, "https://clo2.synthvale.com"}   # new home + the old one (still served)
+        self.web_origins = {self.web, "https://clo2.synthvale.com", "https://clo.sakura5.app"}   # public + owner's + old domain (all served)
         self.ts_web, self.ts_host, self.ts_login = ts_web, "", ""   # web app ↔ this Mac over Tailscale HTTPS (see start_ts_web)
         if lan_port:
             self.start_lan()

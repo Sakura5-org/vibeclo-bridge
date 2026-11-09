@@ -33,7 +33,7 @@ CONFIG = {
     "lan_port": 7789,          # direct path for phones on the same network (0 = relay only)
     "ts_web": 7779,            # web app over Tailscale HTTPS (tailscale serve :8443 → 127.0.0.1:ts_web; 0 = off)
     "self_update": False,      # git checkouts: fast-forward from the upstream (owner's Macs; off by default)
-    "auto_update": True,       # one-line installs (~/.clo2/app): signed releases from clo.sakura5.app
+    "auto_update": True,       # one-line installs (~/.clo2/app): signed releases from clo2.sakura5.app
     "update_every": 3600,
     "claude": None,  # auto: ~/.local/bin, /opt/homebrew/bin, PATH
     "codex": None,   # OpenAI Codex CLI, auto like claude (no codex = the app doesn't offer it)
@@ -3781,12 +3781,12 @@ def main():
             return r
         tun = tunnel_mod.Tunnel(CONFIG["relay"], CONFIG.get("label") or CONFIG["machine"], device_write, log, ops=TUNNEL_OPS,
                                 lan_port=CONFIG.get("lan_port", 7789), ts_web=CONFIG.get("ts_web", 7779),
-                                web=CONFIG.get("web", "https://clo.sakura5.app"))
+                                web=CONFIG.get("web", "https://clo2.sakura5.app"))
         tun.on_push_result = on_push_result
         localstore.listeners.append(tun.changed)   # devices hear about session/inbox writes instead of polling
         _tunnel["t"] = tun
         threading.Thread(target=tun.run, daemon=True).start()
-        pairpage.serve(tun, CONFIG["port"], log, CONFIG.get("web", "https://clo.sakura5.app"))
+        pairpage.serve(tun, CONFIG["port"], log, CONFIG.get("web", "https://clo2.sakura5.app"))
     RESTART.unlink(missing_ok=True)  # this is the restarted process
     try:
         if CONFIG.get("link_tools", True):
