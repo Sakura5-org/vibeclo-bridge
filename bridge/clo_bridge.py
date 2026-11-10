@@ -3552,7 +3552,7 @@ def heartbeat(uid):
             # restart.sh waiting for running turns: new ones are held until then (the app says why they wait)
             "restarting": RESTART.exists(), "runningCount": len([r for r in _running if r not in _injected_ids]), "tools": [t for t in CLI_TOOLS if (HOME / ".local/bin" / t).exists()],
             "procs": _procs_safe(),
-            "features": ["inject", "skills", "openLoops", "saved", "child", "suggest", "effort", "environments", "signed", "secrets", "chat", "procs", "changes", "secretFetch", "memory"] + (["codex"] if CONFIG["codex"] else [])})  # app only sends kinds a bridge understands
+            "features": ["inject", "skills", "openLoops", "saved", "child", "suggest", "effort", "environments", "signed", "secrets", "chat", "procs", "changes", "secretFetch", "memory", "github"] + (["codex"] if CONFIG["codex"] else [])})  # app only sends kinds a bridge understands
 
 
 def self_update_loop():
@@ -3760,10 +3760,172 @@ def op_secret_fetch(req, dev):
     return 200, {"status": resp.status, "headers": out_headers, "body": base64.b64encode(data).decode()}
 
 
+# ---------------------------------------------------------------- GitHub (through the Mac's own `gh` login)
+# No OAuth app, no token in the phone/web: the Mac's GitHub CLI lists repos and clones; "Kết nối GitHub" runs
+# `gh auth login --web` here and hands the one-time code to the device.
+GH = {"login": None}   # running `gh auth login` (one at a time)
+
+
+def gh_bin():
+    return shutil.which("gh", path=f"/opt/homebrew/bin:/usr/local/bin:{HOME}/.local/bin:/usr/bin:" + os.environ.get("PATH", ""))
+
+
+def _gh(*args, timeout=60):
+    return subprocess.run([gh_bin(), *args], capture_output=True, text=True, timeout=timeout, env=dict(os.environ, GH_PROMPT_DISABLED="1", NO_COLOR="1"))
+
+
+def _gh_login_name():
+    r = _gh("api", "user", "--jq", ".login", timeout=20)
+    return r.stdout.strip() if r.returncode == 0 else ""
+
+
+def _repo_of(folder):
+    """origin remote of a local repo → "owner/name" (github.com only), else ""."""
+    try:
+        cfg = (pathlib.Path(folder) / ".git" / "config").read_text(errors="replace")
+    except OSError:
+        return ""
+    m = re.search(r'\[remote "origin"\][^\[]*?url\s*=\s*(\S+)', cfg)
+    m = m and re.search(r"github\.com[:/]+([\w.-]+/[\w.-]+?)(?:\.git)?/?$", m.group(1))
+    return m.group(1).lower() if m else ""
+
+
+_local_gh = {"at": 0, "map": {}}
+
+
+def local_github_repos():
+    """"owner/name" → folder for GitHub clones on this Mac: the picker's repos (~, 3 levels) plus ~/code and the clone
+    folder searched deeper (repos often sit at ~/code/<group>/<org>/<repo>). Rescanned every 10 min / after a clone."""
+    if time.time() - _local_gh["at"] < 600:
+        return _local_gh["map"]
+    found = list(project_dirs())
+
+    def walk(d, depth):
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            return
+        for e in entries:
+            if not e.is_dir(follow_symlinks=False) or e.name in SKIP_DIRS or e.name.startswith("."):
+                continue
+            if os.path.isdir(os.path.join(e.path, ".git")):
+                found.append(e.path)
+            elif depth < 5:
+                walk(e.path, depth + 1)
+
+    for root in {HOME / "code", clone_dir()}:
+        if root.is_dir():
+            walk(str(root), 1)
+    out = {}
+    for d in found:
+        k = _repo_of(d)
+        if k and k not in out:
+            out[k] = d
+    _local_gh.update(at=time.time(), map=out)
+    return out
+
+
+def clone_dir():
+    return pathlib.Path(os.path.expanduser(CONFIG.get("clone_dir") or str(HOME / "code")))
+
+
+def op_gh_status(req, dev):
+    if not gh_bin():
+        return 200, {"installed": False, "login": "", "pending": None}
+    login = _gh_login_name()
+    pend = GH["login"]
+    if pend and (pend["proc"].poll() is not None or login):
+        GH["login"] = pend = None
+    return 200, {"installed": True, "login": login, "pending": {"code": pend["code"], "url": pend["url"]} if pend else None}
+
+
+def op_gh_repos(req, dev):
+    if not gh_bin():
+        return 400, {"error": "GitHub CLI (gh) chưa cài trên Mac: brew install gh"}
+    r = _gh("api", "--paginate", "user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member",
+            "--jq", ".[] | {n: .full_name, d: (.description // \"\"), p: .private, t: .pushed_at}", timeout=90)
+    if r.returncode != 0:
+        return 401 if "auth" in r.stderr.lower() or "login" in r.stderr.lower() else 500, {"error": (r.stderr.strip() or "gh lỗi")[:300]}
+    local = local_github_repos()
+    repos = []
+    for line in r.stdout.splitlines()[:600]:
+        try:
+            x = json.loads(line)
+        except ValueError:
+            continue
+        repos.append({"name": x["n"], "description": (x.get("d") or "")[:200], "private": bool(x.get("p")),
+                      "pushedAt": x.get("t") or "", "local": local.get(x["n"].lower(), "")})
+    return 200, {"repos": repos, "home": str(HOME)}
+
+
+def op_gh_clone(req, dev):
+    name = str(req.get("repo") or "")
+    if not re.fullmatch(r"[\w.-]{1,100}/[\w.-]{1,100}", name) or ".." in name:
+        return 400, {"error": "Tên repo không hợp lệ"}
+    have = local_github_repos().get(name.lower())
+    if have and os.path.isdir(have):
+        return 200, {"path": have, "cloned": False}
+    base = clone_dir()
+    owner, repo = name.split("/")
+    dest = base / repo
+    if dest.exists():
+        if _repo_of(dest) == name.lower():
+            return 200, {"path": str(dest), "cloned": False}
+        dest = base / f"{owner}-{repo}"
+        if dest.exists():
+            if _repo_of(dest) == name.lower():
+                return 200, {"path": str(dest), "cloned": False}
+            return 409, {"error": f"{dest} đã có và không phải repo {name}"}
+    base.mkdir(parents=True, exist_ok=True)
+    log("gh clone", name, "→", dest)
+    r = _gh("repo", "clone", name, str(dest), timeout=900)
+    if r.returncode != 0:
+        return 500, {"error": (r.stderr.strip() or "clone lỗi")[-300:]}
+    _projects["at"] = _local_gh["at"] = 0   # show it in the folder lists right away
+    return 200, {"path": str(dest), "cloned": True}
+
+
+def op_gh_login(req, dev):
+    """Start `gh auth login --web`; return its one-time code + the device URL for the user to open on the phone."""
+    if not gh_bin():
+        return 400, {"error": "GitHub CLI (gh) chưa cài trên Mac: brew install gh"}
+    pend = GH["login"]
+    if pend and pend["proc"].poll() is None:
+        return 200, {"code": pend["code"], "url": pend["url"]}
+    proc = subprocess.Popen([gh_bin(), "auth", "login", "--web", "-h", "github.com", "-p", "https", "--skip-ssh-key"],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            env=dict(os.environ, NO_COLOR="1", BROWSER="true"), start_new_session=True)
+    code, url, lines = "", "https://github.com/login/device", []
+    deadline = time.time() + 20
+    while time.time() < deadline and not code:
+        line = proc.stdout.readline()
+        if not line:
+            break
+        lines.append(line)
+        m = re.search(r"code:\s*([A-Z0-9]{4}-[A-Z0-9]{4})", line)
+        if m:
+            code = m.group(1)
+    if not code:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        return 500, {"error": ("".join(lines).strip() or "gh không đưa mã đăng nhập")[-300:]}
+    try:
+        proc.stdin.write("\n"); proc.stdin.flush()   # "Press Enter to open github.com…" (BROWSER=true: nothing opens on the Mac)
+    except OSError:
+        pass
+    threading.Thread(target=lambda: (proc.stdout.read(), proc.wait(), _gh("auth", "setup-git", timeout=30)), daemon=True).start()
+    GH["login"] = {"proc": proc, "code": code, "url": url}
+    log("gh login started (device code)")
+    return 200, {"code": code, "url": url}
+
+
 TUNNEL_OPS = {"upload": op_upload, "artifact": op_artifact, "secret.set": op_secret_set,
               "secret.delete": op_secret_delete, "secret.reveal": op_secret_reveal, "secret.fetch": op_secret_fetch,
               "memory.projects": op_memory_projects, "memory.files": op_memory_files, "memory.write": op_memory_write,
-              "memory.delete": op_memory_delete, "memory.dreams": op_memory_dreams, "memory.undo": op_memory_undo}
+              "memory.delete": op_memory_delete, "memory.dreams": op_memory_dreams, "memory.undo": op_memory_undo,
+              "gh.status": op_gh_status, "gh.repos": op_gh_repos, "gh.clone": op_gh_clone, "gh.login": op_gh_login}
 
 
 def main():
