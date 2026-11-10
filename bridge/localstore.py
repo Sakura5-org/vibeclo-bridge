@@ -72,10 +72,12 @@ def get(path, mask=None):
 def list_coll(path, mask=None, page_size=None):
     parent, _, coll = path.strip("/").rpartition("/")
     with _lock:
-        rows = _db.execute("SELECT path, fields, created, updated FROM docs WHERE parent=? AND coll=? ORDER BY path",
+        rows = _db.execute("SELECT path, fields, created, updated FROM docs WHERE parent=? AND coll=? ORDER BY updated DESC, path",
                            (parent, coll)).fetchall()
+    # pageSize is ignored on purpose: no nextPageToken here and the app doesn't page, so a cap silently hid documents
+    # (a Mac with >300 sessions lost pinned ones). Local reads cost nothing; return the whole collection, newest first.
     docs = [_doc_json(p, json.loads(f), c, u, mask) for p, f, c, u in rows]
-    return {"documents": docs[:page_size] if page_size else docs} if docs else {}
+    return {"documents": docs} if docs else {}
 
 
 def patch(path, fields, merge_keys=None):
