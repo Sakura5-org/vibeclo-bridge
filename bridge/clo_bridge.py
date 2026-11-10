@@ -334,7 +334,8 @@ SECRET_HINT = (" Secrets: the user keeps passwords/API keys/tokens in the Vibecl
                "names (never values). Use one without printing it: `X=$(clo2-secret get NAME) cmd`, `eval \"$(clo2-secret env NAME)\"`, or "
                "`clo2-secret run NAME -- cmd`; never echo, log, commit or write a value to a file you show. If you need one that isn't "
                "stored, never ask the user to paste it in chat: put `clo2-secret ask NAME --label \"what it is\"`'s printed line in your "
-               "reply on its own line — the app shows a secure input card — then end the turn (or `clo2-secret wait NAME`).")
+               "reply on its own line — the app shows a secure input card — then end the turn: once the user saves it you get a "
+               "message to continue (or `clo2-secret wait NAME` to keep the turn open).")
 
 
 # ---------------------------------------------------------------- Claude Code transcripts
@@ -1173,7 +1174,7 @@ def verified(uid, rid, req):
     """What to run for this request. Only paired devices (end-to-end encrypted tunnel) can write the store, so a request
     runs as written — except one this bridge queued itself (a sub-session report), which runs exactly what it wrote."""
     own = _load(OWN).get(rid)
-    if own and req.get("fromChild"):
+    if own and (req.get("fromChild") or req.get("fromBridge")):
         # Queued by this bridge: run exactly what it wrote, with the folder/profile it chose.
         keep = {k: v for k, v in req.items() if k in ("status", "createdAt", "editedAt", "force", "interrupt")}
         return {**keep, **own["req"]} if hashlib.sha256(json.dumps(own["req"], sort_keys=True).encode()).hexdigest() == own["h"] else None
@@ -3660,7 +3661,56 @@ def op_secret_set(req, dev):
         return 400, {"error": str(e)}
     refresh_local_secrets()
     log("secret saved", req.get("name"), "from", dev.get("name"))   # the name only, never the value
+    threading.Thread(target=continue_after_secret, args=(str(req.get("name") or ""),), daemon=True).start()
     return 200, {"ok": True}
+
+
+SECRET_READY = ("[Vibeclo] The user just saved {name} in the secrets vault from the card you showed. Continue the task that "
+                "needed it now — use it with clo2-secret get/env/run, never print it.")
+_secret_pinged = set()
+
+
+def continue_after_secret(name):
+    """A secret the user just saved from a `clo2-secret ask` card → the Claude session that asked for it (its last reply
+    holds the card and it isn't running) gets a turn telling it to carry on, so the user doesn't have to say "done"."""
+    try:
+        card = re.compile(r"clo2-secret://ask\?name=" + re.escape(urllib.parse.quote_plus(name)) + r"(?:[&`\s]|$)")
+        uid, cutoff = lookup_uid(), time.time() - 86400
+        files = sorted(((p.stat().st_mtime, p) for p in PROJECTS.glob("*/*.jsonl")), reverse=True)[:60]
+        for mtime, path in files:
+            if mtime < cutoff:
+                break
+            sid = path.stem
+            if (sid, name) in _secret_pinged:
+                continue
+            with open(path, "rb") as f:
+                f.seek(max(0, path.stat().st_size - 400_000))
+                if not card.search(f.read().decode(errors="replace")):
+                    continue
+            sess = parse_session(path)
+            turns = (sess or {}).get("turns") or []
+            last = turns[-1] if turns else None
+            if not last or last.get("role") != "assistant" or not card.search(last.get("text") or ""):
+                continue   # the user already answered (or the card was in an older reply)
+            rows = api("POST", f"{BASE}/clo/{uid}:runQuery", {"structuredQuery": {
+                "from": [{"collectionId": "terminalInbox"}],
+                "where": {"fieldFilter": {"field": {"fieldPath": "sessionId"}, "op": "EQUAL", "value": enc(sid)}}}}) or []
+            reqs = sorted((unfields(r["document"]) for r in rows if r.get("document")), key=lambda d: str(d.get("createdAt") or ""))
+            if any(r.get("status") in ("pending", "running") for r in reqs):
+                continue   # a turn is queued/running (e.g. it used `clo2-secret wait`): it sees the secret itself
+            prev = reqs[-1] if reqs else {}
+            _secret_pinged.add((sid, name))
+            rid = str(uuid.uuid4())
+            turn = {"text": SECRET_READY.format(name=name), "sessionId": sid, "cwd": prev.get("cwd") or sess.get("cwd") or str(HOME),
+                    "machine": CONFIG["machine"], "profile": prev.get("profile") or "claude", "browser": False, "fork": False,
+                    "effort": prev.get("effort") or "", "model": prev.get("model") or "", "fromBridge": "secret"}
+            m = {k: v for k, v in _load(OWN).items() if isinstance(v, dict) and v.get("t", 0) > time.time() - SIGN_MAX_AGE}
+            m[rid] = {"t": time.time(), "req": turn, "h": hashlib.sha256(json.dumps(turn, sort_keys=True).encode()).hexdigest()}
+            OWN.write_text(json.dumps(m))
+            set_doc(f"clo/{uid}/terminalInbox/{rid}", {**turn, "status": "pending", "createdAt": now(), "editedAt": now()})
+            log("secret", name, "→ continue session", sid[:8])
+    except Exception as e:
+        log("secret continue failed:", e)
 
 
 def op_secret_delete(req, dev):
