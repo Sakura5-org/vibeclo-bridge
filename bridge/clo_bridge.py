@@ -20,7 +20,9 @@ straight in, and Claude reads them after its next tool call — like typing duri
 import sys as _sys, pathlib as _pl
 _sys.path.insert(0, str(_pl.Path(__file__).resolve().parent))   # -I (isolated) leaves the script dir off sys.path
 import trial as _trial  # noqa: E402  stdlib only, first: a new release that keeps crashing is rolled back here
-_TRIAL = _trial.start()
+# Only the bridge itself counts as a start: clo-resume and hooks import this module (H-Stacks status-check on every
+# prompt) — counting those rolled healthy releases back.
+_TRIAL = _trial.start() if __name__ == "__main__" else None
 import localstore, tunnel as tunnel_mod, pairpage, clo2_tools, updater  # noqa: E402
 import base64, hashlib, uuid, tempfile, datetime as dt, json, os, re, shutil, pathlib, platform, signal, socket, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
 
@@ -675,7 +677,8 @@ def scan_sessions(uid, force=None, limit=None):
             continue
         # re-upload when the terminal lock flips too, when "working" lapses (90 s without a write: nothing else would
         # touch the file, e.g. claude idles on a background task) and when the bridge says its turn is over
-        key = (mtime, open_in_terminal(sid), time.time() - mtime < 90, answered(sid, mtime), claude_alive(sid) is not None)
+        key = (mtime, open_in_terminal(sid), time.time() - mtime < 90, answered(sid, mtime), claude_alive(sid) is not None,
+               tuple(child_claudes().get(sid, ())))
         if _uploaded.get(sid) == key and sid != force:
             continue
         try:
@@ -759,6 +762,46 @@ def bg_tasks(path, since=0):
     return list(running.values())[-5:]
 
 
+_kids = {"at": 0.0, "by": {}}
+KID_SID = re.compile(r"\bCLAUDE_CODE_SESSION_ID=([0-9a-f-]{36})\b")
+
+
+def child_claudes(max_age=15):
+    """Session id → `claude` processes started from inside it (Claude ran `claude -p …` with the Bash tool, often
+    detached with nohup so it outlives the turn). They carry the parent's CLAUDE_CODE_SESSION_ID in their environment.
+    Shown with the parent session's background tasks."""
+    if time.time() - _kids["at"] < max_age:
+        return _kids["by"]
+    by = {}
+    try:
+        out = subprocess.run(["ps", "-E", "-ww", "-U", str(os.getuid()), "-o", "pid=,lstart=,command="],
+                             capture_output=True, text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        out = ""
+    for line in out.splitlines():
+        m = KID_SID.search(line)
+        if not m:
+            continue
+        parts = line.split(None, 6)
+        if len(parts) < 7:
+            continue
+        cmd = parts[6]
+        argv0 = cmd.split(" ", 1)[0]
+        if not (argv0.endswith("/claude") or argv0 == "claude" or "/claude/versions/" in argv0) \
+                or " -p" not in cmd[: cmd.find(" CLAUDE") if " CLAUDE" in cmd else len(cmd)] and " --print" not in cmd:
+            continue
+        model = re.search(r"--model[ =](\S+)", cmd)
+        name = (model.group(1).replace("claude-", "").replace("-", " ").title() if model else "Claude") + " -p"
+        try:
+            since = dt.datetime.strptime(" ".join(parts[1:6]), "%a %b %d %H:%M:%S %Y").strftime("%H:%M")
+            name += f" · {since}"
+        except ValueError:
+            pass
+        by.setdefault(m.group(1), []).append(name)
+    _kids.update(at=time.time(), by=by)
+    return by
+
+
 def transcript(sid):
     return next(PROJECTS.glob(f"*/{sid}.jsonl"), None) if sid else None
 
@@ -834,7 +877,8 @@ def upload_session(uid, sid, p, mtime, key, limit, agent="claude"):
                "contextTokens": context_tokens(sid) if agent == "claude" else s.get("contextTokens", 0),
                "agent": agent, "model": s.get("model", ""),
                # background agents/commands still running after the answer (the claude process is still up)
-               "bgTasks": bg_tasks(p, claude_alive(sid)) if agent == "claude" and claude_alive(sid) is not None else [],
+               "bgTasks": ((bg_tasks(p, claude_alive(sid)) if agent == "claude" and claude_alive(sid) is not None else [])
+                           + child_claudes().get(sid, []))[-5:],
                "activity": redact(s["activity"]), "activityAt": dt.datetime.fromtimestamp(mtime, dt.timezone.utc),
                "syncedAt": now()}  # every write: app/web list only what changed since their last look (Firestore bills reads)
         try:
