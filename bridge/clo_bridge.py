@@ -674,7 +674,7 @@ def scan_sessions(uid, force=None, limit=None):
             continue
         # re-upload when the terminal lock flips too, when "working" lapses (90 s without a write: nothing else would
         # touch the file, e.g. claude idles on a background task) and when the bridge says its turn is over
-        key = (mtime, open_in_terminal(sid), time.time() - mtime < 90, answered(sid, mtime))
+        key = (mtime, open_in_terminal(sid), time.time() - mtime < 90, answered(sid, mtime), claude_alive(sid) is not None)
         if _uploaded.get(sid) == key and sid != force:
             continue
         try:
@@ -682,6 +682,84 @@ def scan_sessions(uid, force=None, limit=None):
         except Exception as e:  # one bad transcript must not stall the other sessions (or the loop)
             _uploaded[sid] = key  # don't retry every few seconds; retried when the file changes
             log("session failed", sid[:8], e)
+
+
+BG_ID = re.compile(r"agentId: ([0-9a-z]+)|running in background with ID: ([0-9a-z]+)")
+BG_DONE = re.compile(r"<task-id>([0-9a-z]+)</task-id>")
+RESUMED = re.compile(r'"resumedAgentId":\s*"([0-9a-z]+)"')
+
+
+_started = {}  # request id → when its claude started (background tasks from older processes are dead)
+
+
+def claude_alive(sid):
+    """When the oldest live claude the bridge started for this session began (a turn, or one that answered and waits on
+    a background task) — None if there is none."""
+    t = [_started.get(r, 0) for r, osid in list(_run_sid.items())
+         if osid == sid and _running.get(r) is not None and _running[r].poll() is None]
+    return min(t) if t else None
+
+
+def bg_tasks(path, since=0):
+    """Background tasks (Agent runs, Bash run_in_background, agents resumed with SendMessage) started in this transcript
+    and not yet reported done by a <task-notification>: their descriptions, newest last. Only meaningful while a claude
+    for the session is alive (they die with it)."""
+    desc, names, running, sends = {}, {}, {}, set()
+    try:
+        with open(path, "rb") as fh:
+            for raw in fh:
+                if b"run_in_background" not in raw and b"task-notification" not in raw and b"agentId: " not in raw \
+                        and b"running in background with ID" not in raw and b"resumedAgentId" not in raw \
+                        and b'"name":"Agent"' not in raw and b'"name":"Task"' not in raw and b'"name":"SendMessage"' not in raw:
+                    continue
+                try:
+                    d = json.loads(raw)
+                except ValueError:
+                    continue
+                if d.get("isSidechain") or d.get("type") not in ("user", "assistant"):
+                    continue   # (api-request-blob lines replay old messages)
+                try:
+                    ts = dt.datetime.fromisoformat(d["timestamp"].replace("Z", "+00:00")).timestamp()
+                except (KeyError, ValueError, AttributeError):
+                    ts = 0
+                fresh = ts >= since - 5
+                c = (d.get("message") or {}).get("content")
+                if isinstance(c, str):
+                    c = [{"type": "text", "text": c}]
+                for b in c if isinstance(c, list) else []:
+                    if not isinstance(b, dict):
+                        continue
+                    if b.get("type") == "tool_use":
+                        i = b.get("input") or {}
+                        if b.get("name") == "SendMessage":
+                            sends.add(b.get("id"))
+                        if b.get("name") in ("Agent", "Task") or i.get("run_in_background"):
+                            desc[b.get("id")] = (i.get("description") or i.get("command") or b.get("name") or "")[:80]
+                    elif b.get("type") == "tool_result" and b.get("tool_use_id"):
+                        t = b.get("content")
+                        t = t if isinstance(t, str) else " ".join(x.get("text") or "" for x in t if isinstance(x, dict)) \
+                            if isinstance(t, list) else ""
+                        m = BG_ID.search(t)
+                        if m and b["tool_use_id"] in desc:
+                            tid = m.group(1) or m.group(2)
+                            names[tid] = desc[b["tool_use_id"]]
+                            if fresh:
+                                running.pop(tid, None)
+                                running[tid] = names[tid]
+                        m = RESUMED.search(t)
+                        if m and fresh and b["tool_use_id"] in sends:
+                            running.pop(m.group(1), None)
+                            running[m.group(1)] = names.get(m.group(1)) or "agent"
+                    elif b.get("type") == "text" and "<task-notification>" in (b.get("text") or ""):
+                        for m in BG_DONE.finditer(b["text"]):
+                            running.pop(m.group(1), None)
+    except OSError:
+        return []
+    return list(running.values())[-5:]
+
+
+def transcript(sid):
+    return next(PROJECTS.glob(f"*/{sid}.jsonl"), None) if sid else None
 
 
 ASKS = re.compile(r"\?\s*$|(?i:\b(bạn|anh|chị)\s+(muốn|chọn|có muốn|ok|đồng ý|xác nhận|cần)|có nên|hay không|nhé\s*$|"
@@ -754,6 +832,8 @@ def upload_session(uid, sid, p, mtime, key, limit, agent="claude"):
                "background": is_background(uid, sid, p) if agent == "claude" else (s.get("source") == "exec" and sid not in app_sessions(uid)),
                "contextTokens": context_tokens(sid) if agent == "claude" else s.get("contextTokens", 0),
                "agent": agent, "model": s.get("model", ""),
+               # background agents/commands still running after the answer (the claude process is still up)
+               "bgTasks": bg_tasks(p, claude_alive(sid)) if agent == "claude" and claude_alive(sid) is not None else [],
                "activity": redact(s["activity"]), "activityAt": dt.datetime.fromtimestamp(mtime, dt.timezone.utc),
                "syncedAt": now()}  # every write: app/web list only what changed since their last look (Firestore bills reads)
         try:
@@ -1038,6 +1118,7 @@ def run_codex(uid, rid, req, sid, profile, cwd):
         killer.cancel()
         _running.pop(rid, None)
         _run_sid.pop(rid, None)
+        _started.pop(rid, None)
     cancelled = proc.returncode in (-signal.SIGTERM, -signal.SIGKILL) or _stopped.pop(rid, False)
     if not cancelled and not err and proc.returncode != 0:
         err = (proc.stderr.read()[-1500:].strip() or f"codex exit {proc.returncode}")
@@ -1762,6 +1843,7 @@ def run_request(uid, rid, req):
     proc = subprocess.Popen(cmd, cwd=cwd, env=profile_env(profile), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, text=True, start_new_session=True)
     _running[rid] = proc
+    _started[rid] = time.time()
     if sid and not fork and not child:
         _run_sid[rid] = sid
     proc.stdin.write(user_line(prompt_for(rid, req)))
@@ -1778,6 +1860,9 @@ def run_request(uid, rid, req):
 
     def idle_watch():
         while proc.poll() is None:
+            if time.time() - seen["at"] > CONFIG["idle_timeout"] and live and live.get("bg") and live["open"] \
+                    and bg_tasks(transcript(new_sid), _started.get(rid, 0)):
+                seen["at"] = time.time()   # quiet only because a background agent is working: not a stall
             if time.time() - seen["at"] > CONFIG["idle_timeout"]:
                 seen["idle"] = True
                 log("idle kill", rid[:8], "(after its answer — e.g. a background task left waiting)" if seen["answered"] else "")
@@ -1787,6 +1872,16 @@ def run_request(uid, rid, req):
     threading.Thread(target=idle_watch, daemon=True).start()
     parts, new_sid, last_push, result_err = [], sid, 0.0, None
     finished = {"v": False, "lock": threading.Lock(), "timer": None}
+
+    def reopen():
+        """A new message went into this claude while it waited on background tasks: the turn runs again."""
+        with finished["lock"]:
+            finished["v"] = False
+        _lingering.discard(rid)
+        _answered.pop(new_sid, None)
+        set_doc(path, {"status": "running", "editedAt": now()}, ["status", "editedAt"])
+    if live:
+        live["reopen"] = reopen
 
     def finish(status, err, cancelled):
         """Turn over: final status + reply, push, suggestions. Runs once — when the process ends, or `linger_grace`
@@ -1873,7 +1968,15 @@ def run_request(uid, rid, req):
                 seen["answered"] = not ev.get("is_error")
                 more = bool(live) and flush_waiting(uid, live)   # messages sent meanwhile → one more turn, all at once
                 if live and not more:
-                    close_input(live)  # nothing waited: claude exits on EOF
+                    bg = bg_tasks(transcript(new_sid), _started.get(rid, 0)) if new_sid else []
+                    if bg:
+                        # Background agents/commands still running: they die with claude, and claude exits on EOF —
+                        # keep its input open until they report back (the reply above is still pushed as done).
+                        live["bg"] = True
+                        log("answered", rid[:8], "—", len(bg), "background task(s) still running; claude kept up")
+                    else:
+                        live["bg"] = False
+                        close_input(live)  # nothing waited: claude exits on EOF
                 result_err = str(ev.get("result") or ev.get("subtype")) if ev.get("is_error") else None
                 if not result_err and not parts and isinstance(ev.get("result"), str) and ev["result"].strip():
                     parts.append(ANSI.sub("", ev["result"]).strip())
@@ -1901,6 +2004,7 @@ def run_request(uid, rid, req):
                 del _live[sid]
         _running.pop(rid, None)
         _run_sid.pop(rid, None)
+        _started.pop(rid, None)
     cancelled = proc.returncode in (-signal.SIGTERM, -signal.SIGKILL) or _stopped.pop(rid, False)
     if seen["idle"] and seen["answered"] and not result_err:
         cancelled = False   # stopped only because it sat idle after answering: the turn is done, not an error
@@ -1915,6 +2019,17 @@ def run_request(uid, rid, req):
     if finished["v"]:
         log("done", rid[:8], "background work after the answer ended", f"({status})")
         set_doc(path, {"reply": redact("\n\n".join(parts)), "editedAt": now()}, ["reply", "editedAt"])
+        if live and "bg" in live and status == "done" and new_sid and not fork:
+            try:   # the background agents it waited on have reported and claude is done: tell the phone
+                t = (unfields(api("GET", f"{BASE}/clo/{uid}/terminalSessions/{new_sid}") or {}).get("title") or "")
+                notify(uid, "done", new_sid, t, push_summary(redact("\n\n".join(parts))))
+            except Exception as e:
+                log("notify failed", e)
+        if new_sid and not fork:
+            try:
+                scan_sessions(uid, force=new_sid)   # its background tasks are gone: clear them in the app now
+            except Exception as e:
+                log("rescan failed", e)
     else:
         finish(status, err, cancelled)
     if fork:
@@ -2173,10 +2288,23 @@ def poll_inbox(uid):
             proc = _running.get(other)
             if sid and osid == sid and other in _lingering and proc and other not in _stopped and rid not in _running \
                     and not fork and req.get("status") == "pending" and not req.get("kind"):
+                lv = _live.get(sid)
+                if lv and lv["rid"] == other and lv["open"] and lv.get("bg") and not req.get("interrupt") \
+                        and not (req.get("browser") and not lv["browser"]) and not (req.get("text") or "").strip().startswith("/"):
+                    # its background agents are still working: the message goes into the same claude (they live on)
+                    lv["waiting"][rid] = (req, _poll["n"])
+                    lv["reopen"]()
+                    if flush_waiting(uid, lv):
+                        log("into", other[:8], "(background tasks still running) ←", rid[:8])
+                        rid = None
+                        break
+                    lv["waiting"].pop(rid, None)
                 # it already answered and only waits on a background task: the new message runs now
                 log("stop", other[:8], "(answered, background task still running) for", rid[:8])
                 _stopped[other] = True
                 os.killpg(proc.pid, signal.SIGTERM)
+        if rid is None:
+            continue
         if sid and not fork and sid in _busy_sessions and rid not in _running:
             # Session mid-turn: hand the message to the running claude instead of waiting for the turn to end.
             # Slash commands still run as their own turn, after it.

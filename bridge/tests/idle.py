@@ -1,5 +1,5 @@
-"""A turn that answered but left a background task waiting: the idle watchdog stops it, and it ends "done", not
-"error" (it used to push "Claude gặp lỗi").  ~/.clo2/venv/bin/python -I bridge/tests/idle.py"""
+"""A turn that answered but left a background task running: it ends "done" (not "error"), claude stays up for the task
+(input kept open, no idle kill), a new message goes into that same claude, and the session lists the task in bgTasks.  ~/.clo2/venv/bin/python -I bridge/tests/idle.py"""
 import os, sys, time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from harness import Bridge, check, done
@@ -30,5 +30,9 @@ a.queue("idle-3", "Start this with the Bash tool and run_in_background: true:  s
         "reply with exactly: AGAIN", sid=sid)
 st3, _ = a.wait("idle-3", t=200)
 time.sleep(45)   # idle_timeout 20 s + watchdog tick
-check("idle watchdog after the answer → still done, no error", a.wait("idle-3")[0] == "done" and "idle kill" in b.log(), b.log()[-600:])
+check("background task still running → no idle kill, turn stays done", a.wait("idle-3")[0] == "done" and "idle kill" not in b.log(),
+      b.log()[-600:])
+sd = a.doc(f"clo/local/terminalSessions/{sid}") or {}
+bg = [v.get("stringValue") for v in sd.get("bgTasks", {}).get("arrayValue", {}).get("values", [])]
+check("…and the session lists it under bgTasks (app: 'Running in background')", len(bg) >= 1, sd.get("bgTasks"))
 done()
