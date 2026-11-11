@@ -52,6 +52,7 @@ CONFIG = {
     "poll_every": 3,
     "job_timeout": 3600,
     "linger_grace": 60,   # s after claude answered but stays up (a background task): then the turn counts as done
+    "bg_timeout": 14400,   # s from the start a turn may live on while its own background agents run (job_timeout extends)
     "idle_timeout": 1200,  # no stream event this long (stalled API call) → kill the turn so the session queue moves on
 }
 cfg_file = pathlib.Path(__file__).with_name("config.json")
@@ -1854,8 +1855,22 @@ def run_request(uid, rid, req):
                              "browser": browser, "injected": [], "waiting": {}}
     else:
         proc.stdin.close()
-    killer = threading.Timer(CONFIG["job_timeout"], lambda: os.killpg(proc.pid, signal.SIGTERM))
-    killer.start()
+    timers = {}
+
+    def time_up():
+        """job_timeout reached. Still waiting on its own background agents (it answered already): give them more
+        time, up to `bg_timeout` from the start — killing claude kills them."""
+        st = _started.get(rid, time.time())
+        if live and live.get("bg") and live["open"] and time.time() - st < CONFIG.get("bg_timeout", 14400) \
+                and bg_tasks(transcript(new_sid), st):
+            timers["k"] = threading.Timer(600, time_up)
+            timers["k"].daemon = True
+            timers["k"].start()
+            return
+        os.killpg(proc.pid, signal.SIGTERM)
+    timers["k"] = threading.Timer(CONFIG["job_timeout"], time_up)
+    timers["k"].daemon = True
+    timers["k"].start()
     seen = {"at": time.time(), "answered": False, "idle": False}
 
     def idle_watch():
@@ -1997,7 +2012,7 @@ def run_request(uid, rid, req):
                 last_push = time.time()
         proc.wait()
     finally:
-        killer.cancel()
+        timers["k"].cancel()
         if live:
             close_input(live)
             if _live.get(sid) is live:
