@@ -3763,7 +3763,8 @@ def release_update_loop():
     time.sleep(CONFIG.get("update_first", 120))
     while True:
         try:
-            if updater.check(BRIDGE_DIR, log):
+            # the owner can turn it off in the menu bar (settings.json autoUpdate); "Check for updates" still works
+            if tunnel_mod.setting("autoUpdate") != "off" and updater.check(BRIDGE_DIR, log):
                 link_tools()
                 subprocess.run(["bash", str(BRIDGE_DIR / "install.sh"), "menubar"], capture_output=True, timeout=600)
                 if not RESTART.exists():

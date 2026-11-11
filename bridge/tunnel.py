@@ -52,7 +52,8 @@ PAIR_VIA = {"tailnet": "Tailscale only", "wifi": "Same Wi-Fi only", "both": "Tai
 # What Claude may do for a paired device. "standard": edit files in the project, other actions needing permission are
 # refused (claude -p can't ask). "full": --dangerously-skip-permissions when the device asks for it (yolo profile).
 ACCESS = {"full": "Full access — claude --dangerously-skip-permissions", "standard": "Standard — claude --permission-mode acceptEdits"}
-DEFAULTS = {"pairVia": "both", "access": "full"}   # full = yolo, as plain `claude --dangerously-skip-permissions`
+AUTO_UPDATE = {"on": "Automatic updates on", "off": "Automatic updates off"}
+DEFAULTS = {"pairVia": "both", "access": "full", "autoUpdate": "on"}   # full = yolo, as plain `claude --dangerously-skip-permissions`
 
 
 def setting(key):
@@ -64,7 +65,7 @@ def setting(key):
 
 
 def set_setting(key, value):
-    if value not in {"pairVia": PAIR_VIA, "access": ACCESS}.get(key, ()):
+    if value not in {"pairVia": PAIR_VIA, "access": ACCESS, "autoUpdate": AUTO_UPDATE}.get(key, ()):
         return False
     try:
         cur = json.loads(SETTINGS.read_text())
@@ -424,6 +425,7 @@ class Tunnel:
                 "pairing": self.qr() if self.pairing and self.pairing["exp"] > time.time() else None,
                 "pairingShare": self.qr(share=True) if self.pairing and self.pairing["exp"] > time.time() else None,
                 "pairingExp": self.pairing["exp"] if self.pairing else 0, "pairVia": self.pair_via, "access": setting("access"),
+                "autoUpdate": setting("autoUpdate"),
                 "pending": [{"tag": t, "name": p["name"], "check": p["check"], "via": p.get("via", "")} for t, p in self.pending.items()],
                 "devices": [{"id": d["hash"], "name": d["name"], "addedAt": d["addedAt"], "lastSeen": d.get("lastSeen", 0)} for d in self.devices]}
 

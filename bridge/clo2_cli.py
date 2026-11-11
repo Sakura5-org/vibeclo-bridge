@@ -5,6 +5,7 @@
   clo2 devices              paired devices · clo2 revoke NAME|ID  removes one
   clo2 settings             choose where devices may pair from and what Claude may do (interactive)
   clo2 settings pair-via tailnet|wifi|both|any · clo2 settings access standard|full [--yes]
+  clo2 settings auto-update on|off   install signed updates automatically (on by default)
   clo2 tailscale            let the web app on your other computers reach this Mac over Tailscale (sets up
                             `tailscale serve` on :8443 once; run it here in Terminal)
   clo2 skill install|remove teach Claude Code about Vibeclo (~/.claude/skills/clo2)
@@ -164,6 +165,7 @@ def cmd_status():
     print(f"{s.get('label') or 'This Mac'} · {'online' if s.get('online') else 'offline (relay not reachable)'}")
     print(f"Pairing from: {dict(PAIR_VIA).get(s.get('pairVia'), s.get('pairVia'))}")
     print(f"Access: {dict(ACCESS).get(s.get('access'), s.get('access')).split(' — ')[0]}")
+    print(f"Automatic updates: {s.get('autoUpdate') or 'on'}")
     print(f"Paired devices: {len(s['devices'])}" + (f" · waiting: {len(s['pending'])}" if s.get("pending") else ""))
     print(f"Claude Code skill: {'installed' if SKILL.exists() else 'not installed (clo2 skill install)'}")
 
@@ -196,6 +198,10 @@ def cmd_settings(args):
             if value == "full" and not yes and not sys.stdin.isatty():
                 sys.exit("Full access needs a person at the terminal (or --yes): clo2 settings access full")
             return set_access(value, ask=not yes)
+        if args[0] == "auto-update" and value in ("on", "off"):
+            api("/api/settings", {"key": "autoUpdate", "value": value})
+            return print("Automatic updates: " + value + ("" if value == "on" else
+                         " — you won't get fixes (including security fixes) until you choose 'Check for updates' in the menu bar or turn this back on"))
         if key == "pairVia" and value in dict(PAIR_VIA):
             api("/api/settings", {"key": "pairVia", "value": value})
             return print(f"Pairing from: {dict(PAIR_VIA)[value]}")

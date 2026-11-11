@@ -106,6 +106,10 @@ TXT
   [[ "$(ask '  Choose 1–2 [1]: ')" == 2 ]] && access=standard
   setting pairVia "$via"; setting access "$access"
   echo "  → pairing from: $via · access: $access   (change later: clo2 settings)"
+  if [[ -f "$DIR/MANIFEST.json" ]]; then
+    echo "  → automatic updates: on — Vibeclo checks clo2.sakura5.app about once an hour and installs new versions"
+    echo "    signed by Vibeclo when no task is running. Turn off: menu bar icon, or clo2 settings auto-update off"
+  fi
   skill="$(ask $'\n  Teach Claude Code about Vibeclo (adds the skill ~/.claude/skills/clo2)? [Y/n] ')"
   # no one at the terminal: don't add it unasked (clo2 skill install does it later)
   if [[ -z "${CLO2_NO_AGENT:-}" ]] && { : </dev/tty; } 2>/dev/null && [[ "$skill" != [nN]* ]]; then

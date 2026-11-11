@@ -44,6 +44,9 @@ def pair_link(state):
 
 VIA = [("tailnet", "Tailscale only"), ("wifi", "Same Wi-Fi only"), ("both", "Tailscale or same Wi-Fi"),
        ("any", "Anywhere (also links sent over the internet)")]
+AUTO_OFF_WARNING = ("Vibeclo checks for a new signed version about once an hour and installs it when no task is running. "
+                    "With automatic updates off, you won't get fixes — including security fixes — until you choose "
+                    "\"Check for updates\" yourself.")
 ACCESS = [("full", "Full access — claude --dangerously-skip-permissions"),
           ("standard", "Standard — claude --permission-mode acceptEdits")]
 FULL_WARNING = ("Full access lets a paired phone or browser run Claude Code in “yolo” mode: it runs ANY command without "
@@ -79,7 +82,9 @@ def plan(state):
     items.append((f"Devices ({len(devs)})", None,
                   [(d["name"], None, [(f"Revoke {d['name']}", ("revoke", d["id"], d["name"]), None)]) for d in devs]
                   or [("No devices yet", None, None)]))
+    auto = (state.get("autoUpdate") or "on") == "on"
     items += [None, ("Restart Vibeclo", ("restart",), None), ("Check for updates", ("update",), None),
+              (("✓ " if auto else "    ") + "Install updates automatically", ("autoupdate", "off" if auto else "on"), None),
               (f"Version {version()}", None, None), ("Quit menu bar icon", ("quit",), None)]
     return items
 
@@ -211,6 +216,10 @@ def main():
                     subprocess.run(["launchctl", "kickstart", f"gui/{os.getuid()}/{LABEL}"], capture_output=True)
                 elif kind == "update":
                     self.update()
+                elif kind == "autoupdate":
+                    if a[1] == "on" or os.environ.get("CLO2_SELFTEST_CLICK") or rumps.alert(
+                            "Turn off automatic updates?", AUTO_OFF_WARNING, ok="Turn off", cancel="Keep on") == 1:
+                        api("/api/settings", {"key": "autoUpdate", "value": a[1]})
                 elif kind == "quit":
                     rumps.quit_application()
             except Exception as e:
