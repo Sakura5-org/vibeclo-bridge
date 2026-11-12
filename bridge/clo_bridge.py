@@ -2433,10 +2433,11 @@ def merge_queued(uid, rid, req, sid, docs):
 
 def prune_missing(uid):
     """Session docs of this Mac whose transcript file no longer exists (deleted tests, forks, cleanups)."""
-    r = api("GET", f"{BASE}/clo/{uid}/terminalSessions?pageSize=300&mask.fieldPaths=machine") or {}
+    r = api("GET", f"{BASE}/clo/{uid}/terminalSessions?pageSize=300&mask.fieldPaths=machine&mask.fieldPaths=agent") or {}
     for d in r.get("documents", []):
-        sid = d["name"].rsplit("/", 1)[-1]
-        if unfields(d).get("machine") == CONFIG["machine"] and not any(PROJECTS.glob(f"*/{sid}.jsonl")):
+        sid, f = d["name"].rsplit("/", 1)[-1], unfields(d)
+        # Codex sessions live in ~/.codex, not PROJECTS: pruning them here re-uploaded every one on the next scan, all day
+        if f.get("machine") == CONFIG["machine"] and f.get("agent") != "codex" and not any(PROJECTS.glob(f"*/{sid}.jsonl")):
             api("DELETE", f"https://firestore.googleapis.com/v1/{d['name']}")
             _uploaded.pop(sid, None)
             log("pruned missing session", sid[:8])
