@@ -194,7 +194,13 @@ s=""
 for _ in $(seq 1 30); do
   s="$(curl -fsS -m 2 http://127.0.0.1:7788/api/state 2>/dev/null)" && break; sleep 1
 done
-if [[ "$s" == *'"devices": []'* ]] && { : </dev/tty; } 2>/dev/null; then
+if [[ -n "$WSL" && -n "$s" ]] && command -v explorer.exe >/dev/null; then
+  # Windows: the web app in the PC's own browser is the first client. WSL forwards localhost, so this local page hands
+  # the browser an auto-approved pairing link (same as "Connect this Mac" on the web app's sign-in page).
+  echo "Opening Vibeclo in your Windows browser — it pairs with this PC by itself."
+  echo "(Didn't open? Go to http://127.0.0.1:7788/web in Edge or Chrome on this PC.  Phone: clo2 pair)"
+  explorer.exe "http://127.0.0.1:7788/web" >/dev/null 2>&1 || true
+elif [[ "$s" == *'"devices": []'* ]] && { : </dev/tty; } 2>/dev/null; then
   "$VENV/bin/python" -I "$DIR/clo2_cli.py" pair </dev/tty || true
 else
   echo "Pair a phone: clo2 pair   (if “clo2” isn't found, open a new Terminal window or add ~/.local/bin to PATH)"
