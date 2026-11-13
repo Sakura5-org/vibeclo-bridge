@@ -6,11 +6,33 @@ set -euo pipefail
 BASE="${CLO2_BASE:-https://clo2.sakura5.app}"
 APP="$HOME/.clo2/app"
 
-case "$(uname)" in Darwin|Linux) ;; *) echo "The Vibeclo bridge runs on macOS or Linux."; exit 1;; esac
+case "$(uname)" in
+  Darwin|Linux) ;;
+  MINGW*|MSYS*|CYGWIN*) echo "On Windows, Vibeclo runs inside WSL2 (Ubuntu). In PowerShell: wsl --install -d Ubuntu — then open Ubuntu"
+    echo "and run this same command there. Full guide: $BASE/windows"; exit 1;;
+  *) echo "The Vibeclo bridge runs on macOS, Linux or Windows (WSL2) — see $BASE/windows"; exit 1;;
+esac
+# Windows (WSL2): the bridge is a systemd user service, so WSL must boot with systemd.
+if grep -qi microsoft /proc/version 2>/dev/null && [[ ! -d /run/systemd/system ]]; then
+  echo "WSL is running without systemd, which Vibeclo needs to keep the bridge running."
+  if { : </dev/tty; } 2>/dev/null; then
+    printf "Turn systemd on now (adds [boot] systemd=true to /etc/wsl.conf, asks for your password)? [Y/n] " >/dev/tty
+    read -r a </dev/tty || a=""
+    if [[ "$a" != [nN]* ]] && { grep -q "^systemd=true" /etc/wsl.conf 2>/dev/null || printf '\n[boot]\nsystemd=true\n' | sudo tee -a /etc/wsl.conf >/dev/null; }; then
+      echo "Done. Now in Windows PowerShell run:  wsl --shutdown"
+      echo "then open Ubuntu again and run this install command once more."
+      exit 0
+    fi
+  fi
+  echo "Add these two lines to /etc/wsl.conf:  [boot]  systemd=true  — then run 'wsl --shutdown' in PowerShell,"
+  echo "reopen Ubuntu and run this command again. Guide: $BASE/windows"; exit 1
+fi
 command -v python3 >/dev/null || { echo "Python 3 is needed (macOS: xcode-select --install · Ubuntu: sudo apt install python3 python3-venv)."; exit 1; }
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 9))' || { echo "Python 3.9 or newer is needed."; exit 1; }
 if ! command -v claude >/dev/null && [[ ! -x "$HOME/.local/bin/claude" ]]; then
-  echo "Claude Code (the claude command) isn't installed. Install it first: https://claude.com/claude-code — then run this again."; exit 1
+  echo "Claude Code (the claude command) isn't installed. Install it first: https://claude.com/claude-code — then run this again."
+  grep -qi microsoft /proc/version 2>/dev/null && echo "(On WSL, install it inside Ubuntu: curl -fsSL https://claude.ai/install.sh | bash — the Windows copy isn't visible here.)"
+  exit 1
 fi
 
 mkdir -p -m 700 "$HOME/.clo2"

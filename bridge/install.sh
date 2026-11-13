@@ -14,6 +14,23 @@ LOG="$HOME/Library/Logs/clo2-bridge.log"
 VENV="$HOME/.clo2/venv"
 
 LINUX=""; [[ "$(uname -s)" == Linux ]] && LINUX=1
+WSL=""; grep -qi microsoft /proc/version 2>/dev/null && WSL=1
+# WSL2 stops the whole Linux VM a little after its last Windows-side client exits — services don't count. A hidden
+# `wsl.exe … sleep infinity`, started from the Windows Startup folder at every login, keeps the bridge reachable.
+wsl_startup() {   # → the Windows Startup folder as a Linux path ("" if Windows interop isn't available)
+  local appdata; appdata="$(cmd.exe /c 'echo %APPDATA%' 2>/dev/null | tr -d '\r')" || return 0
+  [[ -n "$appdata" && "$appdata" != *%* ]] && wslpath "$appdata\\Microsoft\\Windows\\Start Menu\\Programs\\Startup" 2>/dev/null || true
+}
+wsl_keepalive() {
+  local dir; dir="$(wsl_startup)"
+  if [[ -z "$dir" || ! -d "$dir" ]]; then
+    echo "note (WSL): Windows shuts WSL down when no Ubuntu window is open, and the bridge with it. Keep one open,"
+    echo "      or see https://clo2.sakura5.app/windows → 'Keep it running'."; return 0
+  fi
+  printf 'CreateObject("WScript.Shell").Run "wsl.exe -d %s --exec sleep infinity", 0, False\r\n' "${WSL_DISTRO_NAME:-Ubuntu}" > "$dir/vibeclo-wsl.vbs"
+  (cd /tmp && wscript.exe "$(wslpath -w "$dir/vibeclo-wsl.vbs")" >/dev/null 2>&1 &) || true
+  echo "  → WSL keeps running in the background (Windows Startup: vibeclo-wsl.vbs) so your phone can reach this PC"
+}
 UNIT="$HOME/.config/systemd/user/clo2-bridge.service"
 if [[ -n "$LINUX" ]]; then
   LOG="$HOME/.clo2/bridge.log"
@@ -56,7 +73,9 @@ if [[ -n "$LINUX" ]]; then
   [[ -n "${CLO2_NO_AGENT:-}" ]] || systemctl --user stop clo2-bridge 2>/dev/null || true
   if [[ "${1:-}" == "uninstall" ]]; then
     systemctl --user disable clo2-bridge 2>/dev/null || true
-    rm -f "$UNIT"; systemctl --user daemon-reload; echo "removed clo2-bridge.service (data kept in ~/.clo2)"; exit 0
+    rm -f "$UNIT"; systemctl --user daemon-reload; echo "removed clo2-bridge.service (data kept in ~/.clo2)"
+    if [[ -n "$WSL" ]]; then d="$(wsl_startup)"; [[ -n "$d" ]] && rm -f "$d/vibeclo-wsl.vbs"; fi
+    exit 0
   fi
 else
 [[ -n "${CLO2_NO_AGENT:-}" ]] || launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
@@ -139,6 +158,7 @@ UN
   loginctl enable-linger "$USER" 2>/dev/null || echo "note: runs only while you're logged in (loginctl enable-linger $USER needs admin)"
   systemctl --user daemon-reload
   systemctl --user enable --now clo2-bridge
+  [[ -n "$WSL" ]] && wsl_keepalive
   if command -v ufw >/dev/null && sudo -n ufw status 2>/dev/null | grep -q "Status: active" && ! sudo -n ufw status 2>/dev/null | grep -q 7789; then
     echo "note: the ufw firewall blocks phones on the same Wi-Fi (Tailscale still works). To allow them:"
     echo "      sudo ufw allow from 192.168.0.0/16 to any port 7789 proto tcp"
