@@ -28,6 +28,7 @@ const sha = async (s) => {
 
 const ALERTS = { done: "Claude is done", input: "Claude is waiting for you", error: "Claude ran into an error" };
 const PUSH_PER_HOUR = 300;
+const APPS = ["com.leo.clo2", "com.leo.pdfstudio"];
 // Abuse caps per room (one Mac): far above real use (a file through the relay moves ~4 MB/min), low enough that the
 // relay can't be used as someone's free pipe. Counted in memory per minute (a hibernated room starts fresh — fine).
 const ROOM_BYTES_PER_MIN = 64_000_000, ROOM_MSGS_PER_MIN = 6000, MAX_FRAME = 30_000_000, MAX_DEVICE_SOCKETS = 32;
@@ -67,6 +68,9 @@ export class Room {
     if (rl.n >= PUSH_PER_HOUR) return mac.send(JSON.stringify({ op: "pushResult", token: m.token, status: 429 }));
     rl.n++; await s.put("rl", rl);
     let payload, type, topic;
+    // The phone app's bundle id (it registered with it): Vibeclo shipped as com.leo.clo2 (TestFlight) and as the
+    // AI PDF record's com.leo.pdfstudio (App Store). Anything else falls back to the first.
+    const app = APPS.includes(m.app) ? m.app : APPS[0];
     const now = Math.floor(Date.now() / 1000);
     if (m.op === "push") {
       if (!ALERTS[m.kind]) return;
@@ -75,13 +79,13 @@ export class Room {
       // Session title + turn summary, end-to-end encrypted for this phone (only its Notification Service Extension
       // can open it); without it — or on an app without the extension — the fixed text above shows.
       if (typeof m.enc === "string" && /^[A-Za-z0-9+/=]{24,3000}$/.test(m.enc)) { payload.e = m.enc; payload.aps["mutable-content"] = 1; }
-      type = "alert"; topic = "com.leo.clo2";
+      type = "alert"; topic = app;
     } else {
       const working = m.phase === "working";
       const aps = { timestamp: now, event: working ? "update" : "end",
                     "content-state": { activity: working ? "Working…" : m.phase === "error" ? "Error" : "Done", working, title: "" } };
       if (!working) aps["dismissal-date"] = now + 15 * 60;
-      payload = { aps }; type = "liveactivity"; topic = "com.leo.clo2.push-type.liveactivity";
+      payload = { aps }; type = "liveactivity"; topic = app + ".push-type.liveactivity";
     }
     const host = m.env === "sandbox" ? "https://api.sandbox.push.apple.com" : "https://api.push.apple.com";
     try {

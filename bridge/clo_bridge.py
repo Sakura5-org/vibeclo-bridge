@@ -233,7 +233,8 @@ def notify(uid, kind, sid="", title="", text=""):
         return
     for d in devices(uid):
         if d.get("token"):
-            msg = {"op": "push", "token": d["token"], "env": d.get("env") or "production", "kind": kind, "sid": sid}
+            msg = {"op": "push", "token": d["token"], "env": d.get("env") or "production", "kind": kind, "sid": sid,
+                   "app": d.get("app") or ""}   # the phone app's bundle id = the APNs topic (relay allowlists it)
             if d.get("pub") and (title or text):
                 try:
                     msg["enc"] = tunnel_mod.seal_push(tun.key_for(d["pub"]), {"t": title[:120], "b": text[:240]})
@@ -293,7 +294,7 @@ def live_update(uid, sid, title, activity, working, force=False):
         return
     la = unfields(doc)
     _live_sent[sid] = (phase, time.time())
-    tun.ctl({"op": "live", "token": la.get("token"), "env": la.get("env") or "production", "phase": phase})
+    tun.ctl({"op": "live", "token": la.get("token"), "env": la.get("env") or "production", "phase": phase, "app": la.get("app") or ""})
     if not working:
         api("DELETE", f"{BASE}/clo/{uid}/liveActivities/{sid}")
 
