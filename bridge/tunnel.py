@@ -265,6 +265,18 @@ def ts_json(*args):
     raise RuntimeError(f"tailscale {args[0]}: no output (exit {r.returncode if r else '?'}) {err}")
 
 
+KEEP_DAYS = (1, 7, 30, 90, 365)
+
+
+def keep_days(v):
+    """How long a browser asked to stay paired (days); 0 = until removed (the app, older web pages, "never")."""
+    try:
+        v = int(v)
+    except (TypeError, ValueError):
+        return 0
+    return v if v in KEEP_DAYS else 0
+
+
 def tailnet_info(ip, log=None):
     """(same user, device name) for a Tailscale address: same = logged in as this Mac's Tailscale user (not a node shared
     in from someone else's tailnet, not a tagged server). Shown in the "Cho phép" dialog; never approves by itself."""
@@ -429,7 +441,8 @@ class Tunnel:
                 "pairingExp": self.pairing["exp"] if self.pairing else 0, "pairVia": self.pair_via, "access": setting("access"),
                 "autoUpdate": setting("autoUpdate"),
                 "pending": [{"tag": t, "name": p["name"], "check": p["check"], "via": p.get("via", "")} for t, p in self.pending.items()],
-                "devices": [{"id": d["hash"], "name": d["name"], "addedAt": d["addedAt"], "lastSeen": d.get("lastSeen", 0)} for d in self.devices]}
+                "devices": [{"id": d["hash"], "name": d["name"], "addedAt": d["addedAt"], "lastSeen": d.get("lastSeen", 0),
+                             "expiresAt": d.get("expiresAt", 0)} for d in self.devices]}
 
     def qr(self, share=False):
         """The pairing link. Shown on this Mac's screen (QR, "open the web app here") it carries `a`: whoever presents it
@@ -467,6 +480,8 @@ class Tunnel:
             return True
         token = b64u(secrets.token_bytes(32))
         dev = {"hash": token_hash(token), "name": p["name"], "pub": p["pub"], "addedAt": time.time()}
+        if p.get("keep"):   # the browser asked to be remembered for N days (web default 30); the app: until removed
+            dev["expiresAt"] = dev["addedAt"] + p["keep"] * 86400
         for old in [d for d in self.devices if d.get("pub") == p["pub"]]:   # re-paired (app reinstalled): new token replaces the old
             self.ctl({"op": "revoke", "hash": old["hash"]})
         self.devices = [d for d in self.devices if d.get("pub") != p["pub"]] + [dev]
@@ -530,6 +545,14 @@ class Tunnel:
             p["event"].set()
         elif p:
             self.send_to(tag, p["pub"], {"op": "denied"})
+
+    def expired(self, dev):
+        """Past the time it was paired for: removed now (its sockets close with 4001, the browser shows pairing)."""
+        if dev.get("expiresAt") and time.time() > dev["expiresAt"]:
+            self.log("pairing expired for", dev["name"])
+            self.revoke(dev["hash"])
+            return True
+        return False
 
     def revoke(self, dev_id):
         for d in self.devices:
@@ -698,7 +721,8 @@ class Tunnel:
         if hello.get("op") != "hello":
             return
         name = str(hello.get("name") or "Device")[:60]
-        self.pending[tag] = {"pub": pub, "name": name, "check": check_code(self.ident["pub"], pub), "at": time.time()}
+        self.pending[tag] = {"pub": pub, "name": name, "check": check_code(self.ident["pub"], pub), "at": time.time(),
+                             "keep": keep_days(hello.get("keep"))}
         auto = hello.get("a")
         if isinstance(auto, str) and secrets.compare_digest(auto, self.pairing.get("auto", "")):
             self.log("pairing request from", name, "— QR from this screen, approved")
@@ -764,6 +788,8 @@ class Tunnel:
                 status, body = prev[1]
                 send(seal(key, {"id": rid, "status": status, "body": body}))
                 return
+        if self.expired(dev):
+            return
         dev["lastSeen"] = time.time()
         if seen is None:
             self.active[dev["hash"]] = dev["lastSeen"]
@@ -980,6 +1006,8 @@ class Tunnel:
             if not dev:
                 self.log("direct connection refused (not paired) from", peer)
                 return ws.close(4003, "not paired")
+            if self.expired(dev):
+                return ws.close(4001, "expired")
             key = lan_key(self.key_for(pub), challenge)
             if open_frame(key, first.get("data") or "").get("op") != "auth":
                 self.log("direct connection refused (bad auth) from", peer)

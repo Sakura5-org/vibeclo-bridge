@@ -108,14 +108,14 @@ class Bridge:
     def state(self):
         return json.load(urllib.request.urlopen(self.page + "/api/state", timeout=10))
 
-    def pair(self, name):
-        d = Device(self, name)
+    def pair(self, name, **hello):
+        d = Device(self, name, **hello)
         d.approve()
         return d
 
 
 class Device:
-    def __init__(self, bridge, name, mac_key=None):
+    def __init__(self, bridge, name, mac_key=None, **hello):
         self.b = bridge
         bridge.post("/api/settings", {"key": "pairVia", "value": "any"})   # test devices pair with the sent link (default refuses it)
         bridge.post("/api/pair/start"); time.sleep(1)   # the relay learns the code a moment later; a person scanning is slower anyway
@@ -128,7 +128,7 @@ class Device:
         self.name = name
         self.ws = connect(f"wss://{self.p['r']}/room/{self.p['room']}?role=dev&token={self.p['c']}", max_size=None, ping_timeout=90)
         recv(self.ws)
-        self.ws.send(json.dumps({"pub": self.pub, "data": seal(self.key, {"op": "hello", "name": name})}))
+        self.ws.send(json.dumps({"pub": self.pub, "data": seal(self.key, {"op": "hello", "name": name, **hello})}))
 
     def pending(self):
         for _ in range(30):
