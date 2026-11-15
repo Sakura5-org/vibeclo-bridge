@@ -295,16 +295,18 @@ def tailnet_macs(port, timeout=3):
     except Exception:
         return []
     me = st.get("Self", {}).get("UserID")
-    hosts = [(p.get("HostName") or "", (p.get("TailscaleIPs") or [""])[0]) for p in (st.get("Peer") or {}).values()
+    hosts = [(p.get("HostName") or "", (p.get("TailscaleIPs") or [""])[0], str(p.get("DNSName") or "").rstrip(".")) for p in (st.get("Peer") or {}).values()
              if p.get("Online") and p.get("UserID") == me and not p.get("Tags") and (p.get("TailscaleIPs") or [""])[0].startswith("100.")]
 
     def probe(h):
-        name, ip = h
+        name, ip, dns = h
         try:
             with connect(f"ws://{ip}:{port}", open_timeout=timeout, close_timeout=1) as ws:
                 hello = json.loads(ws.recv(timeout=timeout))
             if hello.get("op") == "challenge" and hello.get("k"):
-                return {"name": str(hello.get("n") or name)[:60], "host": ip, "k": hello["k"][:16]}
+                # ts: its https name on the tailnet (tailscale serve), for a browser that isn't paired with it yet
+                return {"name": str(hello.get("n") or name)[:60], "host": ip, "k": hello["k"][:16],
+                        "ts": f"{dns}:{TS_WEB_HTTPS}" if dns.endswith(".ts.net") else ""}
         except Exception:
             return None
     with ThreadPoolExecutor(max_workers=16) as pool:
