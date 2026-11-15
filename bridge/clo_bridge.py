@@ -689,6 +689,12 @@ def scan_sessions(uid, force=None, limit=None):
             log("session failed", sid[:8], e)
 
 
+# A session started in Claude Code's (experimental) Code Mode resumes only in an interactive terminal with Code Mode on;
+# `claude -p --resume` refuses it ("This session was started in Code Mode, which …, so it can't be resumed.").
+CODE_MODE_REFUSED = re.compile(r"started in Code Mode\b.*?can.t be resumed", re.S)
+CODE_MODE_HINT = ("This session was started in Code Mode (Claude Code's experimental mode), which only a terminal on "
+                  "the Mac can continue: run `CLAUDE_CODE_EXPERIMENTAL_CODE_MODE=1 claude --resume` there. "
+                  "To keep working from here, start a new session.")
 BG_ID = re.compile(r"agentId: ([0-9a-z]+)|running in background with ID: ([0-9a-z]+)")
 BG_DONE = re.compile(r"<task-id>([0-9a-z]+)</task-id>")
 RESUMED = re.compile(r'"resumedAgentId":\s*"([0-9a-z]+)"')
@@ -2090,6 +2096,9 @@ def run_request(uid, rid, req):
     elif seen["idle"] and not result_err:
         result_err = f"No reply from Claude for {CONFIG['idle_timeout'] // 60} min — the turn was stopped"
     err = result_err or (None if proc.returncode == 0 or cancelled else (proc.stderr.read()[-1500:] or f"exit {proc.returncode}"))
+    if err and CODE_MODE_REFUSED.search(err):
+        err = CODE_MODE_HINT
+        log("code mode session", (sid or "")[:8], "can't be resumed with -p")
     status = "cancelled" if cancelled else "error" if err else "done"
     if finished["timer"]:
         finished["timer"].cancel()
