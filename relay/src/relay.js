@@ -16,7 +16,10 @@ export default {
     const url = new URL(req.url);
     const m = url.pathname.match(/^\/room\/([A-Za-z0-9_-]{16,64})$/);
     if (!m) return new Response("Vibeclo relay", { status: url.pathname === "/" ? 200 : 404 });
-    if (req.headers.get("Upgrade") !== "websocket") return new Response("websocket only", { status: 426 });
+    // ?check=1 (plain GET): is this device token still let in? A browser can't see why a websocket was refused, and
+    // must not drop its pairing over a network blip (iOS kills sockets in the background).
+    const check = url.searchParams.get("check") === "1" && req.method === "GET";
+    if (!check && req.headers.get("Upgrade") !== "websocket") return new Response("websocket only", { status: 426 });
     return env.ROOM.get(env.ROOM.idFromName(m[1])).fetch(req);
   },
 };
@@ -107,6 +110,9 @@ export class Room {
       if (!owner) await s.put("mac", hash);
       for (const old of this.ctx.getWebSockets("mac")) old.close(4000, "replaced");
       tag = "mac";
+    } else if (role === "dev" && url.searchParams.get("check") === "1") {
+      const ok = ((await s.get("devs")) || []).includes(hash);
+      return new Response(ok ? "ok" : "not paired", { status: ok ? 200 : 403, headers: { "Access-Control-Allow-Origin": "*", "Cache-Control": "no-store" } });
     } else if (role === "dev") {
       const devs = (await s.get("devs")) || [], pairs = ((await s.get("pairs")) || []).filter((p) => p.exp > Date.now());
       if (this.ctx.getWebSockets().filter((w) => this.tag(w) !== "mac").length >= MAX_DEVICE_SOCKETS)
