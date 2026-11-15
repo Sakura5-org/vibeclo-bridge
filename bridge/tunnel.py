@@ -327,7 +327,7 @@ def tailnet_macs(port, timeout=3):
 
 # Collections whose changes paired devices hear about at once (op "changed"), so they don't have to poll.
 PUSH_COLLS = {"terminalSessions", "terminalInbox", "terminalSeen"}
-LAN_GRACE = float(os.environ.get("CLO2_LAN_GRACE") or 30)      # s a pairing dialog stays up after the phone's connection dropped (it reconnects with the same key)
+LAN_GRACE = float(os.environ.get("CLO2_LAN_GRACE") or 120)     # s a pairing dialog stays up after the phone's connection dropped (it reconnects with the same key)
 ACTIVE_FOR = 180   # a device that made a request in the last 3 min gets change notices through the relay
 
 
