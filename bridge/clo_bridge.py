@@ -23,7 +23,7 @@ import trial as _trial  # noqa: E402  stdlib only, first: a new release that kee
 # Only the bridge itself counts as a start: clo-resume and hooks import this module (H-Stacks status-check on every
 # prompt) — counting those rolled healthy releases back.
 _TRIAL = _trial.start() if __name__ == "__main__" else None
-import localstore, tunnel as tunnel_mod, pairpage, clo2_tools, updater  # noqa: E402
+import localstore, tunnel as tunnel_mod, pairpage, clo2_tools, updater, themes  # noqa: E402
 import base64, hashlib, uuid, tempfile, datetime as dt, json, os, re, shutil, pathlib, platform, signal, socket, subprocess, sys, threading, time, urllib.error, urllib.parse, urllib.request
 
 HOME = pathlib.Path.home()
@@ -721,7 +721,15 @@ def bg_tasks(path, since=0):
                     d = json.loads(raw)
                 except ValueError:
                     continue
-                if d.get("isSidechain") or d.get("type") not in ("user", "assistant"):
+                if d.get("isSidechain"):
+                    continue
+                att = d.get("attachment") or {}
+                if d.get("type") == "attachment" and att.get("type") == "queued_command":
+                    # a task finished while a turn was running: its <task-notification> is queued, not a user message
+                    for m in BG_DONE.finditer(str(att.get("prompt") or "")):
+                        running.pop(m.group(1), None)
+                    continue
+                if d.get("type") not in ("user", "assistant"):
                     continue   # (api-request-blob lines replay old messages)
                 try:
                     ts = dt.datetime.fromisoformat(d["timestamp"].replace("Z", "+00:00")).timestamp()
@@ -1969,6 +1977,8 @@ def run_request(uid, rid, req):
                 set_doc(f"clo/{uid}/terminalInbox/{irid}", {"status": "done", "mergedInto": rid, "reply": "", "editedAt": now()},
                         ["status", "mergedInto", "reply", "editedAt"])
             _injected_ids.discard(irid)
+        if live:
+            live["injected"].clear()
         try:
             last = next((l for l in reversed(redact("\n\n".join(parts)).splitlines()) if l.strip() and not l.startswith("🔧")), "")
             if status != "cancelled" and not fork:   # the user stopped it themselves (stop / "Gửi ngay") — no need to tell them
@@ -2026,6 +2036,14 @@ def run_request(uid, rid, req):
                     parts.append(txt)
             elif ev.get("type") == "result":
                 seen["answered"] = not ev.get("is_error")
+                if live and not ev.get("is_error"):
+                    # Claude answered the messages written into this turn: show them as done now, not when the turn
+                    # ends (with a background task that's `linger_grace` later, and the app kept them "in queue").
+                    for irid in list(live["injected"]):
+                        set_doc(f"clo/{uid}/terminalInbox/{irid}", {"status": "done", "mergedInto": rid, "reply": "",
+                                "editedAt": now()}, ["status", "mergedInto", "reply", "editedAt"])
+                        _injected_ids.discard(irid)
+                    live["injected"].clear()
                 more = bool(live) and flush_waiting(uid, live)   # messages sent meanwhile → one more turn, all at once
                 if live and not more:
                     bg = bg_tasks(transcript(new_sid), _started.get(rid, 0)) if new_sid else []
@@ -4161,11 +4179,44 @@ def op_gh_login(req, dev):
     return 200, {"code": code, "url": url}
 
 
+def op_theme_list(req, dev):
+    return 200, {"themes": themes.load(STATE)}
+
+
+def op_theme_make(req, dev):
+    """The user describes a theme (or a change to `base`) → Claude Code on this Mac writes it → checked, saved, returned."""
+    try:
+        run = themes.claude_runner(CONFIG["claude"], profile_env("claude"), str(HOME),
+                                   CONFIG.get("theme_model") or CONFIG.get("subagent_model") or "sonnet")
+        base = req.get("base") if isinstance(req.get("base"), dict) else None
+        t = themes.make(str(req.get("prompt") or ""), base, run)
+        t = themes.save(STATE, t, str((base or {}).get("id") or "") if req.get("replace") else "")
+    except (ValueError, subprocess.TimeoutExpired) as e:
+        return 400, {"error": str(e) or "Couldn't make that theme, try again"}
+    log("theme made", t["id"], t["name"], "for", dev.get("name"))
+    return 200, {"theme": t, "themes": themes.load(STATE)}
+
+
+def op_theme_save(req, dev):
+    try:
+        t = themes.save(STATE, req.get("theme") or {}, str(req.get("id") or ""))
+    except ValueError as e:
+        return 400, {"error": str(e)}
+    return 200, {"theme": t, "themes": themes.load(STATE)}
+
+
+def op_theme_delete(req, dev):
+    themes.delete(STATE, str(req.get("id") or ""))
+    return 200, {"themes": themes.load(STATE)}
+
+
 TUNNEL_OPS = {"upload": op_upload, "artifact": op_artifact, "secret.set": op_secret_set,
               "secret.delete": op_secret_delete, "secret.reveal": op_secret_reveal, "secret.fetch": op_secret_fetch,
               "memory.projects": op_memory_projects, "memory.files": op_memory_files, "memory.write": op_memory_write,
               "memory.delete": op_memory_delete, "memory.dreams": op_memory_dreams, "memory.undo": op_memory_undo,
-              "gh.status": op_gh_status, "gh.repos": op_gh_repos, "gh.clone": op_gh_clone, "gh.login": op_gh_login}
+              "gh.status": op_gh_status, "gh.repos": op_gh_repos, "gh.clone": op_gh_clone, "gh.login": op_gh_login,
+              "theme.list": op_theme_list, "theme.make": op_theme_make, "theme.save": op_theme_save,
+              "theme.delete": op_theme_delete}
 
 
 def main():

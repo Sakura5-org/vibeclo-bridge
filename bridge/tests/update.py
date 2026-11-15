@@ -14,7 +14,7 @@ SITE, APP = ROOT / "site", ROOT / "home/.clo2/app"
 (SITE / "bridge").mkdir(parents=True); APP.mkdir(parents=True)
 key = Ed25519PrivateKey.generate()
 PUB = base64.b64encode(key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode()
-FILES = ["trial.py", "clo_bridge.py", "localstore.py", "tunnel.py", "pairpage.py", "clo2_tools.py", "clo2_cli.py", "updater.py", "clo2_menubar.py",
+FILES = ["trial.py", "clo_bridge.py", "localstore.py", "tunnel.py", "pairpage.py", "themes.py", "clo2_tools.py", "clo2_cli.py", "updater.py", "clo2_menubar.py",
          "clo-resume", "install.sh", "restart.sh"]
 
 
