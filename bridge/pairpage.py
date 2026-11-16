@@ -59,7 +59,7 @@ load();setInterval(load,1500);
 </script></body></html>"""
 
 
-LEGACY_WEB = ("https://clo2.synthvale.com", "https://clo.sakura5.app")   # owner's domain + the old public one; still served, still allowed
+LEGACY_WEB = ("https://remotecc.dev", "https://clo2.synthvale.com", "https://clo.sakura5.app")   # open-source home (2026-11-16) + owner's domain + the old public one; all served, all allowed
 
 
 def serve(tunnel, port=7788, log=print, web="https://clo2.sakura5.app"):
